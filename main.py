@@ -1,18 +1,26 @@
+import asyncio
 import os
 import re
+
+# 🛑 FIX FOR PYTHON 3.10+ / PYROGRAM EVENT LOOP ISSUE
+try:
+  asyncio.get_event_loop()
+except RuntimeError:
+  asyncio.set_event_loop(asyncio.new_event_loop())
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pyrogram import Client
 
-# Environment Variables (Fallback Defaults Configured)
+# Environment Variables
 API_ID = int(os.getenv("API_ID", "31169133"))
 API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv(
     "BOT_TOKEN", "8895047045:AAE6uBXrMfsHy_OwW_Jx-3OegdzOpndzSWA"
 )
-APP_URL = os.getenv("APP_URL", "https://your-app-name.onrender.com")
+APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
 # Initialize Pyrogram Bot Client
 pyro_client = Client(
@@ -34,7 +42,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Allow Cross-Origin Requests for Video Players on Websites
+# CORS Enable
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +52,7 @@ app.add_middleware(
 )
 
 
-# 1. Telegram Message Event Listener
+# 1. Telegram Message Listener
 @pyro_client.on_message()
 async def auto_generate_stream_link(client, message):
   if message.video or message.document:
@@ -70,7 +78,7 @@ async def auto_generate_stream_link(client, message):
     )
 
 
-# 2. High-Performance Video Streaming Route
+# 2. Video Streaming Route
 @app.get("/stream/{chat_id}/{message_id}")
 async def stream_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
@@ -97,7 +105,6 @@ async def stream_video(
   from_bytes = 0
   until_bytes = file_size - 1
 
-  # Video Range Processing (Fast Seek/Forward/Backward support)
   if range:
     range_match = re.search(r"bytes=(\d+)-(\d*)", range)
     if range_match:
@@ -132,4 +139,4 @@ async def stream_video(
 @app.get("/")
 def home():
   return {"status": "Sevenanime Direct Streamer Engine Active 🚀"}
-  
+    
