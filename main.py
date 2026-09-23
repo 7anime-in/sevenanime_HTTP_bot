@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pyrogram import Client, filters
 
-# Environment Variables
 API_ID = int(os.getenv("API_ID", "31169133"))
 API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv(
@@ -16,55 +15,43 @@ BOT_TOKEN = os.getenv(
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
 pyro_client = None
-
-# IN-MEMORY DATABASE FOR WEBSITE SYNC
 anime_database = {}
 
 
-# Smart Parser: Auto-Detects Anime Name (from Forward Title or Caption), Season & Episode
 def parse_anime_info(caption: str, forward_title: str = ""):
   text = caption or ""
 
-  # 1. Custom Title Check in Caption (e.g., "Anime: Solo Leveling")
   explicit_name = re.search(
       r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE
   )
 
-  # 2. Season Number Extraction (e.g., Season - 01, S01, S1)
   season_match = re.search(
       r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
   season = season_match.group(1) if season_match else "1"
 
-  # 3. Episode Number Extraction (Takes last match from patterns like "Episode - 12")
   ep_matches = re.findall(
       r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
-  if ep_matches:
-    episode = int(ep_matches[-1])
-  else:
-    episode = 1
+  episode = int(ep_matches[-1]) if ep_matches else 1
 
-  # 4. Anime Name Final Selection
   if explicit_name:
     raw_title = explicit_name.group(1).strip()
   elif forward_title:
-    # Use Telegram Forward Channel/Group Name
     raw_title = forward_title
   else:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     raw_title = lines[0] if lines else text
 
-  # Clean Title (Remove "hindi dubbed", "1080p", "Episode", "Season" keywords)
+  # Clean "in hindi dubbed", "1080p", "season", "episode" strictly
   clean_title = re.sub(
-      r"(?i)\b(Hindi|Dubbed|Official|1080p|720p|480p|FHD|HD|HEVC|x264|x265|Episode|Season|Language|Quality|Main Channel)\b",
+      r"(?i)\b(In|Hindi|Dubbed|Official|1080p|720p|480p|FHD|HD|HEVC|x264|x265|Episode|Season|Language|Quality|Main Channel)\b",
       "",
       raw_title,
   )
   clean_title = re.sub(r"[^\w\s]", " ", clean_title)
   clean_title = re.sub(r"\s+", " ", clean_title).strip().title()
 
-  # Fallback if title becomes empty or remains invalid
   if not clean_title or clean_title.lower() in ["episode", "season", ""]:
     clean_title = "Solo Leveling"
 
@@ -84,16 +71,13 @@ async def lifespan(app: FastAPI):
       in_memory=True,
   )
 
-  # Command: /start
   @pyro_client.on_message(filters.command("start"))
   async def start_cmd(client, message):
     await message.reply_text(
-        "👋 **SevenAnime Bot Active Hai!**\n\n"
-        "Video upload ya forward karo. Website aur direct links automatic"
-        " ready ho jayenge!"
+        "👋 **SevenAnime Bot Active Hai!**\n\nVideo upload/forward karo,"
+        " links website par auto sync honge!"
     )
 
-  # Handler: Video Receiver & Auto Link Generator
   @pyro_client.on_message(filters.video | filters.document)
   async def auto_link_gen(client, message):
     media = message.video or message.document
@@ -109,7 +93,6 @@ async def lifespan(app: FastAPI):
     )
     caption = message.caption or file_name
 
-    # Extract Telegram Forward Channel Title if available
     forward_title = ""
     if message.forward_from_chat and message.forward_from_chat.title:
       forward_title = message.forward_from_chat.title
@@ -118,11 +101,13 @@ async def lifespan(app: FastAPI):
 
     anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
 
-    # Database Key Creation
+    # Standardized Slug (e.g., solo_leveling)
     slug_key = anime_name.lower().replace(" ", "_")
 
     if slug_key not in anime_database:
-      anime_database[slug_key] = {"seasons": {}}
+      anime_database[slug_key] = {"title": anime_name, "seasons": {}}
+
+    anime_database[slug_key]["title"] = anime_name
 
     if season_num not in anime_database[slug_key]["seasons"]:
       anime_database[slug_key]["seasons"][season_num] = []
@@ -149,6 +134,7 @@ async def lifespan(app: FastAPI):
         f"🎬 **SevenAnime Media Processed!**\n\n"
         f"⛩️ **Anime Name:** `{anime_name}`\n"
         f"🌀 **Season:** `{season_num}` | 📌 **Episode:** `{ep_num}`\n\n"
+        f"🔑 **Slug Key:** `{slug_key}`\n"
         f"🔍 **Verify Video Post:**\n{tg_post_link}\n\n"
         f"📺 **Stream URL:**\n`{stream_url}`\n\n"
         f"📥 **One-Click Download URL:**\n`{download_url}`",
@@ -179,14 +165,19 @@ def get_anime_episodes(anime_slug: str):
   if slug in anime_database:
     return anime_database[slug]
 
-  return {
-      "seasons": {
-          "1": [
-              {"ep": 1, "chat_id": "-1004315586873", "msg_id": 80},
-              {"ep": 2, "chat_id": "-1004315586873", "msg_id": 81},
-          ]
-      }
-  }
+  # Default Fallback Data if backend empty/restarted
+  if "solo_leveling" in slug:
+    return {
+        "title": "Solo Leveling (Hindi Official Audio)",
+        "seasons": {
+            "1": [
+                {"ep": 1, "chat_id": "-1004315586873", "msg_id": 80},
+                {"ep": 2, "chat_id": "-1004315586873", "msg_id": 81},
+            ]
+        },
+    }
+
+  return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
 
 async def get_media_response(
@@ -278,5 +269,5 @@ async def download_video(
 
 @app.get("/")
 def home():
-  return {"status": "SevenAnime Full Engine Active 🚀"}
+  return {"status": "SevenAnime Universal Engine Active 🚀"}
     
