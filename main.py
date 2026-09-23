@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pyrogram import Client, filters
 
+# Environment Variables
 API_ID = int(os.getenv("API_ID", "31169133"))
 API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv(
@@ -43,7 +44,6 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     raw_title = lines[0] if lines else text
 
-  # Clean "in hindi dubbed", "1080p", "season", "episode" strictly
   clean_title = re.sub(
       r"(?i)\b(In|Hindi|Dubbed|Official|1080p|720p|480p|FHD|HD|HEVC|x264|x265|Episode|Season|Language|Quality|Main Channel)\b",
       "",
@@ -61,7 +61,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   global pyro_client
-  print("Starting Pyrogram SevenAnime Engine...")
+  print("Starting Pyrogram SevenAnime Fast Engine...")
 
   pyro_client = Client(
       "sevenanime_bot_session",
@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
   async def start_cmd(client, message):
     await message.reply_text(
         "👋 **SevenAnime Bot Active Hai!**\n\nVideo upload/forward karo,"
-        " links website par auto sync honge!"
+        " links auto sync honge!"
     )
 
   @pyro_client.on_message(filters.video | filters.document)
@@ -100,8 +100,6 @@ async def lifespan(app: FastAPI):
       forward_title = message.forward_sender_name
 
     anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
-
-    # Standardized Slug (e.g., solo_leveling)
     slug_key = anime_name.lower().replace(" ", "_")
 
     if slug_key not in anime_database:
@@ -134,10 +132,9 @@ async def lifespan(app: FastAPI):
         f"🎬 **SevenAnime Media Processed!**\n\n"
         f"⛩️ **Anime Name:** `{anime_name}`\n"
         f"🌀 **Season:** `{season_num}` | 📌 **Episode:** `{ep_num}`\n\n"
-        f"🔑 **Slug Key:** `{slug_key}`\n"
-        f"🔍 **Verify Video Post:**\n{tg_post_link}\n\n"
-        f"📺 **Stream URL:**\n`{stream_url}`\n\n"
-        f"📥 **One-Click Download URL:**\n`{download_url}`",
+        f"🔍 **Verify Post:** {tg_post_link}\n\n"
+        f"📺 **Stream URL:** `{stream_url}`\n"
+        f"📥 **Download URL:** `{download_url}`",
         quote=True,
         disable_web_page_preview=True,
     )
@@ -165,7 +162,6 @@ def get_anime_episodes(anime_slug: str):
   if slug in anime_database:
     return anime_database[slug]
 
-  # Default Fallback Data if backend empty/restarted
   if "solo_leveling" in slug:
     return {
         "title": "Solo Leveling (Hindi Official Audio)",
@@ -180,6 +176,7 @@ def get_anime_episodes(anime_slug: str):
   return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
 
+# Fast & Reliable Byte-Range Streaming Handler
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -219,15 +216,19 @@ async def get_media_response(
       end = range_match.group(2)
       from_bytes = int(start) if start else 0
       if end:
-        until_bytes = int(end)
+        until_bytes = min(int(end), file_size - 1)
 
+  # Chunk limit optimization for smooth web playback
   chunk_length = until_bytes - from_bytes + 1
 
   async def media_streamer():
-    async for chunk in pyro_client.stream_media(
-        msg, offset=from_bytes, limit=chunk_length
-    ):
-      yield chunk
+    try:
+      async for chunk in pyro_client.stream_media(
+          msg, offset=from_bytes, limit=chunk_length
+      ):
+        yield chunk
+    except Exception as e:
+      print(f"Streaming Chunk Error: {e}")
 
   headers = {
       "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
@@ -235,6 +236,8 @@ async def get_media_response(
       "Content-Length": str(chunk_length),
       "Content-Type": mime_type,
       "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "*",
+      "Cache-Control": "no-cache",
   }
 
   if is_download:
