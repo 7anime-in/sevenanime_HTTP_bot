@@ -14,29 +14,64 @@ BOT_TOKEN = os.getenv(
 )
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-# Initialize Pyrogram Bot Client
-pyro_client = Client(
-    "sevenanime_bot_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True,
-)
+# Dynamic global client variable
+pyro_client = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-  print("🔄 Starting Pyrogram Client...")
+  global pyro_client
+  print("🔄 Active Event Loop par Pyrogram Client start ho raha hai...")
+
+  # Initialize Client inside active event loop
+  pyro_client = Client(
+      "sevenanime_bot_session",
+      api_id=API_ID,
+      api_hash=API_HASH,
+      bot_token=BOT_TOKEN,
+      in_memory=True,
+  )
+
+  # Handler 1: /start Command (DM)
+  @pyro_client.on_message(filters.command("start"))
+  async def start_cmd(client, message):
+    print(f"✅ /start received from {message.chat.id}")
+    await message.reply_text(
+        "👋 **SevenAnime Bot Active Hai!**\n\nVideo upload karo, direct stream"
+        " link ready ho jayega!"
+    )
+
+  # Handler 2: Video Receiver (Channel, Group & DM)
+  @pyro_client.on_message(filters.video | filters.document)
+  async def auto_link_gen(client, message):
+    media = message.video or message.document
+    if not media:
+      return
+
+    chat_id = str(message.chat.id)
+    msg_id = message.id
+    base_url = APP_URL.rstrip("/")
+    stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
+    file_name = (
+        getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
+    )
+
+    await message.reply_text(
+        f"🎬 **Direct Stream Link Ready!**\n\n📁 **File Name:**"
+        f" `{file_name}`\n🔗 **Direct Video URL:**\n`{stream_url}`",
+        quote=True,
+    )
+
   await pyro_client.start()
-  print("🚀 Sevenanime Telegram Engine Started Successfully!")
+  print("🚀 Pyrogram Engine Live! Bot ab har message listen kar raha hai.")
   yield
-  print("🛑 Stopping Pyrogram Client...")
+  print("🛑 Stopping Pyrogram Engine...")
   await pyro_client.stop()
 
 
 app = FastAPI(lifespan=lifespan)
 
-# Allow CORS
+# Allow Cross-Origin Requests for HTML5 Player
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,43 +81,16 @@ app.add_middleware(
 )
 
 
-# 1. /start Command Response
-@pyro_client.on_message(filters.command("start"))
-async def start_cmd(client, message):
-  await message.reply_text(
-      "👋 **SevenAnime Direct Streamer Bot Live Hai!**\n\n"
-      "Mujhe kisi **Channel / Group** me Admin bana kar video post karo, "
-      "ya direct yahan Video bhej do—main fast direct stream link de dunga! 🎬"
-  )
-
-
-# 2. Auto Stream Link Generator (DM, Channel, Group)
-@pyro_client.on_message(filters.video | filters.document)
-async def auto_link_gen(client, message):
-  media = message.video or message.document
-  if not media:
-    return
-
-  chat_id = str(message.chat.id)
-  msg_id = message.id
-  base_url = APP_URL.rstrip("/")
-  stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
-  file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
-
-  await message.reply_text(
-      f"🎬 **Direct Stream Link Ready!**\n\n"
-      f"📁 **File Name:** `{file_name}`\n"
-      f"🔗 **Direct Video URL:**\n`{stream_url}`\n\n"
-      f"⚡ *Is link ko kisi bhi Player / Browser me direct play kar sakte hain.*",
-      quote=True,
-  )
-
-
-# 3. High-Speed Streaming Engine
+# Direct Fast Streaming Engine Endpoint
 @app.get("/stream/{chat_id}/{message_id}")
 async def stream_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
 ):
+  if not pyro_client:
+    raise HTTPException(
+        status_code=503, detail="Telegram engine start nahi hua hai."
+    )
+
   try:
     target_chat = int(chat_id)
     msg = await pyro_client.get_messages(target_chat, message_id)
@@ -136,5 +144,5 @@ async def stream_video(
 
 @app.get("/")
 def home():
-  return {"status": "Sevenanime Direct Streamer Engine Active 🚀"}
-  
+  return {"status": "Sevenanime Engine Active 🚀"}
+    
