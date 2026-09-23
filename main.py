@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 
-# 🛑 FIX FOR PYTHON 3.10+ / PYROGRAM EVENT LOOP ISSUE
+# Python 3.10+ Pyrogram Event Loop Fix
 try:
   asyncio.get_event_loop()
 except RuntimeError:
@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pyrogram import Client
+from pyrogram import Client, filters
 
 # Environment Variables
 API_ID = int(os.getenv("API_ID", "31169133"))
@@ -22,7 +22,6 @@ BOT_TOKEN = os.getenv(
 )
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-# Initialize Pyrogram Bot Client
 pyro_client = Client(
     "sevenanime_bot_session",
     api_id=API_ID,
@@ -35,14 +34,14 @@ pyro_client = Client(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   await pyro_client.start()
-  print("🚀 Sevenanime Telegram Engine Started Successfully!")
+  print("🚀 Sevenanime Streaming Backend Live!")
   yield
   await pyro_client.stop()
 
 
 app = FastAPI(lifespan=lifespan)
 
-# CORS Enable
+# CORS Policy for Web Players
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,51 +51,59 @@ app.add_middleware(
 )
 
 
-# 1. Telegram Message Listener
-@pyro_client.on_message()
-async def auto_generate_stream_link(client, message):
-  if message.video or message.document:
-    chat_id = str(message.chat.id)
-    if chat_id.startswith("-100"):
-      chat_id = chat_id[4:]
-    elif chat_id.startswith("-"):
-      chat_id = chat_id[1:]
-
-    msg_id = message.id
-    base_url = APP_URL.rstrip("/")
-    stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
-
-    file_name = getattr(
-        message.video or message.document, "file_name", "Anime_Video.mp4"
-    )
-
-    await message.reply_text(
-        f"🎬 **Stream Link Ready!**\n\n"
-        f"📁 **File:** `{file_name}`\n"
-        f"🔗 **Direct Video URL:**\n`{stream_url}`\n\n"
-        f"⚡ *Is link ko apne HTML5 player / Website player me play kar sakte hain.*"
-    )
+# 1. /start Command
+@pyro_client.on_message(filters.command("start"))
+async def start_cmd(client, message):
+  await message.reply_text(
+      "👋 **SevenAnime Direct Streamer Engine Active!**\n\n"
+      "Mujhe kisi Channel / Group me Admin bana kar video daalo, "
+      "ya mujhe direct video send karo—main aapko direct fast link de dunga! 🎬"
+  )
 
 
-# 2. Video Streaming Route
+# 2. Auto Direct Link Generator (Channel, Group & Direct DM)
+@pyro_client.on_message(filters.video | filters.document)
+async def auto_link_gen(client, message):
+  media = message.video or message.document
+  if not media:
+    return
+
+  chat_id = str(message.chat.id)
+  msg_id = message.id
+  base_url = APP_URL.rstrip("/")
+  stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
+  file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
+
+  await message.reply_text(
+      f"🎬 **Direct Stream Link Ready!**\n\n"
+      f"📁 **File Name:** `{file_name}`\n"
+      f"🔗 **Direct Video URL:**\n`{stream_url}`\n\n"
+      f"⚡ *Is link ko kisi bhi HTML5 Player / Browser me direct play kar sakte hain.*",
+      quote=True,
+  )
+
+
+# 3. Fast Streaming Engine with Range Requests (Seek Forward/Backward Support)
 @app.get("/stream/{chat_id}/{message_id}")
 async def stream_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
 ):
   try:
-    target_chat = (
-        int(f"-100{chat_id}") if not chat_id.startswith("-") else int(chat_id)
-    )
+    target_chat = int(chat_id)
     msg = await pyro_client.get_messages(target_chat, message_id)
   except Exception as e:
     raise HTTPException(
-        status_code=404, detail=f"Message/Video not found: {str(e)}"
+        status_code=404,
+        detail=(
+            "Video message not found! Make sure Bot is Admin in this"
+            f" Channel/Group. Error: {str(e)}"
+        ),
     )
 
   media = msg.video or msg.document
   if not media:
     raise HTTPException(
-        status_code=400, detail="No video or streamable document found"
+        status_code=400, detail="No video file found in this message"
     )
 
   file_size = media.file_size
@@ -139,4 +146,4 @@ async def stream_video(
 @app.get("/")
 def home():
   return {"status": "Sevenanime Direct Streamer Engine Active 🚀"}
-    
+  
