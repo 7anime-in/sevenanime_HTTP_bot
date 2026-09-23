@@ -21,56 +21,51 @@ pyro_client = None
 anime_database = {}
 
 
-# Enhanced Helper function: Smart Parser for Anime Name, Season & Episode
-def parse_anime_info(text: str):
-  if not text:
-    return "Solo Leveling", "1", 1
+# Smart Parser: Auto-Detects Anime Name (from Forward Title or Caption), Season & Episode
+def parse_anime_info(caption: str, forward_title: str = ""):
+  text = caption or ""
 
-  # 1. Custom Explicit Anime Name Tag Check (e.g. "Anime: Solo Leveling")
+  # 1. Custom Title Check in Caption (e.g., "Anime: Solo Leveling")
   explicit_name = re.search(
       r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE
   )
 
-  # 2. Season Detection (e.g. Season 01, S1, S01)
+  # 2. Season Number Extraction (e.g., Season - 01, S01, S1)
   season_match = re.search(
-      r"(?:S|Season\s*)([0-9]{1,2})", text, re.IGNORECASE
+      r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
   season = season_match.group(1) if season_match else "1"
 
-  # 3. Episode Detection (e.g. Episode 10, Ep 10, E10)
-  ep_match = re.search(
-      r"(?:E|Ep|Episode\s*|[\s\-\_\[])([0-9]{1,3})(?:[\s\.\-\_\]]|$)",
-      text,
-      re.IGNORECASE,
+  # 3. Episode Number Extraction (Takes last match from patterns like "Episode - 12")
+  ep_matches = re.findall(
+      r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
-  episode = int(ep_match.group(1)) if ep_match else 1
-
-  # 4. Clean Anime Title Extraction
-  if explicit_name:
-    clean_title = explicit_name.group(1).strip()
-    # Remove unwanted trailing episode/season numbers if attached
-    clean_title = re.sub(
-        r"(?i)\b(S[0-9]{1,2}|Season\s*[0-9]{1,2}|E[0-9]{1,3}|Ep\s*[0-9]{1,3}|Episode\s*[0-9]{1,3})\b",
-        "",
-        clean_title,
-    )
+  if ep_matches:
+    episode = int(ep_matches[-1])
   else:
-    # Take the first non-empty line
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-    first_line = lines[0] if lines else text
+    episode = 1
 
-    # Remove Emojis, Symbols, Arrows, and Tags
-    clean_title = re.sub(r"[^\w\s]", " ", first_line)
-    # Strip common technical keywords
-    clean_title = re.sub(
-        r"(?i)\b(S[0-9]{1,2}|Season\s*[0-9]{1,2}|E[0-9]{1,3}|Ep\s*[0-9]{1,3}|Episode\s*[0-9]{1,3}|1080p|720p|480p|FHD|HD|HEVC|x264|x265|Hindi|Dubbed|Official|Language|Quality|Main Channel)\b",
-        "",
-        clean_title,
-    )
+  # 4. Anime Name Final Selection
+  if explicit_name:
+    raw_title = explicit_name.group(1).strip()
+  elif forward_title:
+    # Use Telegram Forward Channel/Group Name
+    raw_title = forward_title
+  else:
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    raw_title = lines[0] if lines else text
 
+  # Clean Title (Remove "hindi dubbed", "1080p", "Episode", "Season" keywords)
+  clean_title = re.sub(
+      r"(?i)\b(Hindi|Dubbed|Official|1080p|720p|480p|FHD|HD|HEVC|x264|x265|Episode|Season|Language|Quality|Main Channel)\b",
+      "",
+      raw_title,
+  )
+  clean_title = re.sub(r"[^\w\s]", " ", clean_title)
   clean_title = re.sub(r"\s+", " ", clean_title).strip().title()
 
-  if not clean_title or len(clean_title) < 2:
+  # Fallback if title becomes empty or remains invalid
+  if not clean_title or clean_title.lower() in ["episode", "season", ""]:
     clean_title = "Solo Leveling"
 
   return clean_title, str(int(season)), episode
@@ -114,9 +109,16 @@ async def lifespan(app: FastAPI):
     )
     caption = message.caption or file_name
 
-    anime_name, season_num, ep_num = parse_anime_info(caption)
+    # Extract Telegram Forward Channel Title if available
+    forward_title = ""
+    if message.forward_from_chat and message.forward_from_chat.title:
+      forward_title = message.forward_from_chat.title
+    elif message.forward_sender_name:
+      forward_title = message.forward_sender_name
 
-    # Database Key Creation (e.g. "solo_leveling")
+    anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
+
+    # Database Key Creation
     slug_key = anime_name.lower().replace(" ", "_")
 
     if slug_key not in anime_database:
