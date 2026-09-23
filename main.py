@@ -17,27 +17,27 @@ APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
 pyro_client = None
 
-# 🧠 IN-MEMORY DATABASE FOR WEBSITE SYNC
+# IN-MEMORY DATABASE FOR WEBSITE SYNC
 anime_database = {}
 
 
-# Enhanced Helper function: Auto Detect Anime Name, Season & Episode Number
+# Enhanced Helper function: Smart Parser for Anime Name, Season & Episode
 def parse_anime_info(text: str):
   if not text:
     return "Solo Leveling", "1", 1
 
-  # 1. Custom Anime Name Override Check (e.g., "Anime: Naruto" ya "Title: Bleach")
+  # 1. Custom Explicit Anime Name Tag Check (e.g. "Anime: Solo Leveling")
   explicit_name = re.search(
-      r"(?:Anime|Title|Name)\s*:\s*([^|\n\r\t]+)", text, re.IGNORECASE
+      r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE
   )
 
-  # 2. Season Detection (e.g., S02, Season 2, S2)
+  # 2. Season Detection (e.g. Season 01, S1, S01)
   season_match = re.search(
       r"(?:S|Season\s*)([0-9]{1,2})", text, re.IGNORECASE
   )
   season = season_match.group(1) if season_match else "1"
 
-  # 3. Episode Detection (e.g., E12, EP12, Episode 12, [12])
+  # 3. Episode Detection (e.g. Episode 10, Ep 10, E10)
   ep_match = re.search(
       r"(?:E|Ep|Episode\s*|[\s\-\_\[])([0-9]{1,3})(?:[\s\.\-\_\]]|$)",
       text,
@@ -45,28 +45,41 @@ def parse_anime_info(text: str):
   )
   episode = int(ep_match.group(1)) if ep_match else 1
 
-  # 4. Extract Anime Title
+  # 4. Clean Anime Title Extraction
   if explicit_name:
-    clean_title = explicit_name.group(1).strip().title()
-  else:
-    # Clean filename/caption by removing tags, extensions, quality specs
+    clean_title = explicit_name.group(1).strip()
+    # Remove unwanted trailing episode/season numbers if attached
     clean_title = re.sub(
-        r"(?i)(S[0-9]{1,2}|Season\s*[0-9]{1,2}|E[0-9]{1,3}|Ep\s*[0-9]{1,3}|Episode\s*[0-9]{1,3}|1080p|720p|480p|FHD|HD|HEVC|x264|x265|\[.*?\]|\(.*?\)|.mp4|.mkv|.avi|Hindi|Dubbed)",
+        r"(?i)\b(S[0-9]{1,2}|Season\s*[0-9]{1,2}|E[0-9]{1,3}|Ep\s*[0-9]{1,3}|Episode\s*[0-9]{1,3})\b",
         "",
-        text,
+        clean_title,
     )
-    clean_title = re.sub(r"[\_\-\.]+", " ", clean_title).strip().title()
+  else:
+    # Take the first non-empty line
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    first_line = lines[0] if lines else text
+
+    # Remove Emojis, Symbols, Arrows, and Tags
+    clean_title = re.sub(r"[^\w\s]", " ", first_line)
+    # Strip common technical keywords
+    clean_title = re.sub(
+        r"(?i)\b(S[0-9]{1,2}|Season\s*[0-9]{1,2}|E[0-9]{1,3}|Ep\s*[0-9]{1,3}|Episode\s*[0-9]{1,3}|1080p|720p|480p|FHD|HD|HEVC|x264|x265|Hindi|Dubbed|Official|Language|Quality|Main Channel)\b",
+        "",
+        clean_title,
+    )
+
+  clean_title = re.sub(r"\s+", " ", clean_title).strip().title()
 
   if not clean_title or len(clean_title) < 2:
     clean_title = "Solo Leveling"
 
-  return clean_title, season, episode
+  return clean_title, str(int(season)), episode
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   global pyro_client
-  print("🔄 Starting Pyrogram SevenAnime Engine...")
+  print("Starting Pyrogram SevenAnime Engine...")
 
   pyro_client = Client(
       "sevenanime_bot_session",
@@ -81,11 +94,11 @@ async def lifespan(app: FastAPI):
   async def start_cmd(client, message):
     await message.reply_text(
         "👋 **SevenAnime Bot Active Hai!**\n\n"
-        "Video upload ya forward karo, direct stream & download links ready ho"
-        " jayenge aur website par episode auto-update ho jayega!"
+        "Video upload ya forward karo. Website aur direct links automatic"
+        " ready ho jayenge!"
     )
 
-  # Handler: Video Receiver & Parser
+  # Handler: Video Receiver & Auto Link Generator
   @pyro_client.on_message(filters.video | filters.document)
   async def auto_link_gen(client, message):
     media = message.video or message.document
@@ -96,7 +109,6 @@ async def lifespan(app: FastAPI):
     msg_id = message.id
     base_url = APP_URL.rstrip("/")
 
-    # File Info & Auto-Detection
     file_name = (
         getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
     )
@@ -104,7 +116,7 @@ async def lifespan(app: FastAPI):
 
     anime_name, season_num, ep_num = parse_anime_info(caption)
 
-    # Database Slug Key (e.g. "solo_leveling")
+    # Database Key Creation (e.g. "solo_leveling")
     slug_key = anime_name.lower().replace(" ", "_")
 
     if slug_key not in anime_database:
@@ -113,7 +125,6 @@ async def lifespan(app: FastAPI):
     if season_num not in anime_database[slug_key]["seasons"]:
       anime_database[slug_key]["seasons"][season_num] = []
 
-    # Episode database update
     ep_list = anime_database[slug_key]["seasons"][season_num]
     existing_ep = next((item for item in ep_list if item["ep"] == ep_num), None)
     if existing_ep:
@@ -123,18 +134,15 @@ async def lifespan(app: FastAPI):
       ep_list.append({"ep": ep_num, "chat_id": chat_id, "msg_id": msg_id})
       ep_list.sort(key=lambda x: x["ep"])
 
-    # URLs
     stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
     download_url = f"{base_url}/download/{chat_id}/{msg_id}"
 
-    # Telegram Message Direct Post Link Logic
     if chat_id.startswith("-100"):
       clean_chat_id = chat_id[4:]
       tg_post_link = f"https://t.me/c/{clean_chat_id}/{msg_id}"
     else:
       tg_post_link = getattr(message, "link", "N/A")
 
-    # Detailed Reply with Post Link for Easy Verification
     await message.reply_text(
         f"🎬 **SevenAnime Media Processed!**\n\n"
         f"⛩️ **Anime Name:** `{anime_name}`\n"
@@ -147,14 +155,13 @@ async def lifespan(app: FastAPI):
     )
 
   await pyro_client.start()
-  print("🚀 SevenAnime Engine Live!")
+  print("SevenAnime Engine Live!")
   yield
   await pyro_client.stop()
 
 
 app = FastAPI(lifespan=lifespan)
 
-# CORS Policy
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -164,14 +171,12 @@ app.add_middleware(
 )
 
 
-# API Endpoint for Website Player
 @app.get("/api/episodes/{anime_slug}")
 def get_anime_episodes(anime_slug: str):
   slug = anime_slug.lower().replace("-", "_")
   if slug in anime_database:
     return anime_database[slug]
 
-  # Fallback sample data
   return {
       "seasons": {
           "1": [
@@ -182,7 +187,6 @@ def get_anime_episodes(anime_slug: str):
   }
 
 
-# Streaming & Range Download Engine
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -252,7 +256,6 @@ async def get_media_response(
   )
 
 
-# Stream Endpoint
 @app.get("/stream/{chat_id}/{message_id}")
 async def stream_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
@@ -262,7 +265,6 @@ async def stream_video(
   )
 
 
-# One-Click Download Endpoint
 @app.get("/download/{chat_id}/{message_id}")
 async def download_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
@@ -275,4 +277,4 @@ async def download_video(
 @app.get("/")
 def home():
   return {"status": "SevenAnime Full Engine Active 🚀"}
-      
+    
