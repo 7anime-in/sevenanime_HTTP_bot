@@ -1,14 +1,6 @@
-import asyncio
+from contextlib import asynccontextmanager
 import os
 import re
-
-# Python 3.10+ Pyrogram Event Loop Fix
-try:
-  asyncio.get_event_loop()
-except RuntimeError:
-  asyncio.set_event_loop(asyncio.new_event_loop())
-
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -22,6 +14,7 @@ BOT_TOKEN = os.getenv(
 )
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
+# Initialize Pyrogram Bot Client
 pyro_client = Client(
     "sevenanime_bot_session",
     api_id=API_ID,
@@ -33,15 +26,17 @@ pyro_client = Client(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+  print("🔄 Starting Pyrogram Client...")
   await pyro_client.start()
-  print("🚀 Sevenanime Streaming Backend Live!")
+  print("🚀 Sevenanime Telegram Engine Started Successfully!")
   yield
+  print("🛑 Stopping Pyrogram Client...")
   await pyro_client.stop()
 
 
 app = FastAPI(lifespan=lifespan)
 
-# CORS Policy for Web Players
+# Allow CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,17 +46,17 @@ app.add_middleware(
 )
 
 
-# 1. /start Command
+# 1. /start Command Response
 @pyro_client.on_message(filters.command("start"))
 async def start_cmd(client, message):
   await message.reply_text(
-      "👋 **SevenAnime Direct Streamer Engine Active!**\n\n"
-      "Mujhe kisi Channel / Group me Admin bana kar video daalo, "
-      "ya mujhe direct video send karo—main aapko direct fast link de dunga! 🎬"
+      "👋 **SevenAnime Direct Streamer Bot Live Hai!**\n\n"
+      "Mujhe kisi **Channel / Group** me Admin bana kar video post karo, "
+      "ya direct yahan Video bhej do—main fast direct stream link de dunga! 🎬"
   )
 
 
-# 2. Auto Direct Link Generator (Channel, Group & Direct DM)
+# 2. Auto Stream Link Generator (DM, Channel, Group)
 @pyro_client.on_message(filters.video | filters.document)
 async def auto_link_gen(client, message):
   media = message.video or message.document
@@ -78,12 +73,12 @@ async def auto_link_gen(client, message):
       f"🎬 **Direct Stream Link Ready!**\n\n"
       f"📁 **File Name:** `{file_name}`\n"
       f"🔗 **Direct Video URL:**\n`{stream_url}`\n\n"
-      f"⚡ *Is link ko kisi bhi HTML5 Player / Browser me direct play kar sakte hain.*",
+      f"⚡ *Is link ko kisi bhi Player / Browser me direct play kar sakte hain.*",
       quote=True,
   )
 
 
-# 3. Fast Streaming Engine with Range Requests (Seek Forward/Backward Support)
+# 3. High-Speed Streaming Engine
 @app.get("/stream/{chat_id}/{message_id}")
 async def stream_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
@@ -93,11 +88,7 @@ async def stream_video(
     msg = await pyro_client.get_messages(target_chat, message_id)
   except Exception as e:
     raise HTTPException(
-        status_code=404,
-        detail=(
-            "Video message not found! Make sure Bot is Admin in this"
-            f" Channel/Group. Error: {str(e)}"
-        ),
+        status_code=404, detail=f"Video message not found: {str(e)}"
     )
 
   media = msg.video or msg.document
