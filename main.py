@@ -92,26 +92,21 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 async def auto_scan_channels():
   print("🔍 Auto Scanning Telegram Channels for All Animes...")
 
-  # Peer Cache Warmup to prevent 'Peer id invalid'
-  try:
-    print("🔄 Caching channel access hashes...")
-    async for _ in pyro_client.get_dialogs():
-      pass
-  except Exception as e:
-    print(f"⚠️ Dialogs cache warning: {e}")
-
   for ch_id in CHANNEL_IDS:
     ch_id = ch_id.strip()
     if not ch_id:
       continue
     try:
-      target_chat = (
-          int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else ch_id
-      )
+      # Invite Link, Username, ya Integer ID handle karne ke liye
+      if ch_id.startswith("-100") or (ch_id.startswith("-") and ch_id[1:].isdigit()) or ch_id.isdigit():
+        target_chat = int(ch_id)
+      else:
+        target_chat = ch_id
 
+      # Fetch Chat details (handles Invite links and resolve hashes)
       chat_info = await pyro_client.get_chat(target_chat)
 
-      # limit=0 means UNLIMITED scanning (saari purani & nayi videos scan hongi)
+      # limit=0 means unlimited scanning
       async for message in pyro_client.get_chat_history(
           chat_info.id, limit=0
       ):
@@ -124,7 +119,7 @@ async def auto_scan_channels():
               else (message.forward_sender_name or "")
           )
           add_to_database(str(chat_info.id), message.id, caption, forward_title)
-      print(f"✅ Channel {ch_id} scanned successfully!")
+      print(f"✅ Channel '{chat_info.title}' ({chat_info.id}) scanned successfully!")
     except Exception as e:
       print(f"⚠️ Error scanning channel {ch_id}: {e}")
 
@@ -142,9 +137,7 @@ async def lifespan(app: FastAPI):
       in_memory=True,
   )
 
-  # ---------------------------------------------------------
   # BOT COMMAND HANDLERS
-  # ---------------------------------------------------------
   @pyro_client.on_message(filters.command("start"))
   async def start_cmd(client, message):
     await message.reply_text(
@@ -172,9 +165,7 @@ async def lifespan(app: FastAPI):
         quote=True,
     )
 
-  # ---------------------------------------------------------
   # AUTO LINK GENERATOR FOR MEDIA
-  # ---------------------------------------------------------
   @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats"]))
   async def auto_link_gen(client, message):
     media = message.video or message.document
@@ -289,15 +280,20 @@ async def get_media_response(
       until_bytes = int(end) if end else file_size - 1
 
   chunk_length = until_bytes - from_bytes + 1
-
-  # Convert bytes into 1MB chunks for Pyrogram stream_media offset
+  
+  # Calculate 1MB chunk offset and precise remaining bytes alignment
   chunk_offset = from_bytes // (1024 * 1024)
+  bytes_to_skip = from_bytes % (1024 * 1024)
 
   async def media_streamer():
     try:
+      first_chunk = True
       async for chunk in pyro_client.stream_media(
           msg, offset=chunk_offset
       ):
+        if first_chunk and bytes_to_skip > 0:
+          chunk = chunk[bytes_to_skip:]
+          first_chunk = False
         yield chunk
     except Exception as e:
       print(f"Streaming Error: {e}")
