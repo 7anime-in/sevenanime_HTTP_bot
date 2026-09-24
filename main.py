@@ -97,18 +97,14 @@ async def auto_scan_channels():
     if not ch_id:
       continue
     try:
-      # Invite Link, Username, ya Integer ID handle karne ke liye
-      if ch_id.startswith("-100") or (ch_id.startswith("-") and ch_id[1:].isdigit()) or ch_id.isdigit():
-        target_chat = int(ch_id)
-      else:
-        target_chat = ch_id
+      # Convert ID string to Integer (-100xxxxxxxxxx)
+      target_chat = (
+          int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else ch_id
+      )
 
-      # Fetch Chat details (handles Invite links and resolve hashes)
-      chat_info = await pyro_client.get_chat(target_chat)
-
-      # limit=0 means unlimited scanning
+      # Direct chat history scan using numeric Chat ID
       async for message in pyro_client.get_chat_history(
-          chat_info.id, limit=0
+          target_chat, limit=0
       ):
         media = message.video or message.document
         if media:
@@ -118,8 +114,8 @@ async def auto_scan_channels():
               if message.forward_from_chat
               else (message.forward_sender_name or "")
           )
-          add_to_database(str(chat_info.id), message.id, caption, forward_title)
-      print(f"✅ Channel '{chat_info.title}' ({chat_info.id}) scanned successfully!")
+          add_to_database(str(target_chat), message.id, caption, forward_title)
+      print(f"✅ Channel '{target_chat}' scanned successfully!")
     except Exception as e:
       print(f"⚠️ Error scanning channel {ch_id}: {e}")
 
@@ -280,7 +276,7 @@ async def get_media_response(
       until_bytes = int(end) if end else file_size - 1
 
   chunk_length = until_bytes - from_bytes + 1
-  
+
   # Calculate 1MB chunk offset and precise remaining bytes alignment
   chunk_offset = from_bytes // (1024 * 1024)
   bytes_to_skip = from_bytes % (1024 * 1024)
@@ -344,4 +340,4 @@ async def download_video(
 @app.get("/")
 def home():
   return {"status": "SevenAnime Engine Active 🚀"}
-    
+            
