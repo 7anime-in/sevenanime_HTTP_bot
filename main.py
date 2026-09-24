@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pyrogram import Client, filters
 
+# Environment Variables
 API_ID = int(os.getenv("API_ID", "31169133"))
 API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv(
@@ -24,16 +25,19 @@ anime_database = {}
 def parse_anime_info(caption: str, forward_title: str = ""):
   text = caption or ""
 
+  # 1. Season Extraction (e.g. "Season - 01" or "S01")
   season_match = re.search(
       r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
   season = season_match.group(1) if season_match else "1"
 
+  # 2. Episode Extraction (e.g. "Episode - 02" or "Ep 02")
   ep_match = re.search(
       r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
   episode = int(ep_match.group(1)) if ep_match else 1
 
+  # 3. Dynamic Anime Title Cleaning
   explicit_name = re.search(
       r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE
   )
@@ -43,9 +47,11 @@ def parse_anime_info(caption: str, forward_title: str = ""):
   elif forward_title:
     raw_title = forward_title
   else:
+    # First line fallback
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     raw_title = lines[0] if lines else "Unknown Anime"
 
+  # Clean noise words from Title (e.g., "in hindi dubbed", "1080p", "Official")
   clean_title = re.sub(
       r"(?i)\b(in|hindi|dubbed|dub|sub|official|1080p|720p|480p|fhd|hd|hevc|x264|x265|episode|season|language|quality|main channel)\b",
       "",
@@ -84,7 +90,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 
 async def auto_scan_channels():
-  print("🔍 Auto Scanning Telegram Channels...")
+  print("🔍 Auto Scanning Telegram Channels for All Animes...")
   for ch_id in CHANNEL_IDS:
     ch_id = ch_id.strip()
     if not ch_id:
@@ -141,14 +147,17 @@ async def lifespan(app: FastAPI):
     )
 
     add_to_database(chat_id, msg_id, caption, forward_title)
+
     anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
+    stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
+    download_url = f"{base_url}/download/{chat_id}/{msg_id}"
 
     await message.reply_text(
         f"🎬 **Added to Database!**\n\n"
         f"⛩️ **Anime:** `{anime_name}`\n"
         f"📦 **Season:** `{season_num}` | **Episode:** `{ep_num}`\n"
-        f"📺 **Stream:** `{base_url}/stream/{chat_id}/{msg_id}`\n"
-        f"📥 **Download:** `{base_url}/download/{chat_id}/{msg_id}`",
+        f"📺 **Stream:** `{stream_url}`\n"
+        f"📥 **Download:** `{download_url}`",
         quote=True,
     )
 
