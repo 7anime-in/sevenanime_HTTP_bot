@@ -81,7 +81,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   global pyro_client
-  print("Starting Pyrogram Engine...")
+  print("Starting Pyrogram SevenAnime Engine...")
   load_db()
 
   pyro_client = Client(
@@ -140,7 +140,8 @@ async def lifespan(app: FastAPI):
     download_url = f"{base_url}/download/{chat_id}/{msg_id}"
 
     await message.reply_text(
-        f"🎬 **Added Episode {ep_num} for {anime_name}!**\n\n"
+        f"🎬 **Episode {ep_num} Added Successfully!**\n\n"
+        f"⛩️ **Anime:** `{anime_name}`\n"
         f"📺 **Stream:** `{stream_url}`\n"
         f"📥 **Download:** `{download_url}`",
         quote=True,
@@ -148,12 +149,11 @@ async def lifespan(app: FastAPI):
 
   await pyro_client.start()
 
-  # Bot peer cache sync to fix Peer ID invalid error
   try:
     async for dialog in pyro_client.get_dialogs(limit=50):
       pass
   except Exception as e:
-    print(f"Dialog sync log: {e}")
+    print(f"Dialog cache sync: {e}")
 
   print("SevenAnime Engine Live!")
   yield
@@ -162,12 +162,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# CORS Fix for HTML5 Video Players
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Range", "Content-Length", "Accept-Ranges"],
 )
 
 
@@ -177,7 +179,6 @@ def get_anime_episodes(anime_slug: str):
   if slug in anime_database:
     return anime_database[slug]
 
-  # Search fuzzy match
   for key in anime_database:
     if slug in key or key in slug:
       return anime_database[key]
@@ -200,13 +201,12 @@ async def get_media_response(
     msg = await pyro_client.get_messages(target_id, message_id)
   except Exception:
     try:
-      # Refetch chat entity if peer invalid error occurs
       chat_obj = await pyro_client.get_chat(target_id)
       msg = await pyro_client.get_messages(chat_obj.id, message_id)
     except Exception as e:
       raise HTTPException(
           status_code=404,
-          detail=f"Video message nahi mila. Bot ko channel me Admin banayein: {str(e)}",
+          detail=f"Video message nahi mila. Bot ko Admin banayein: {str(e)}",
       )
 
   media = msg.video or msg.document
@@ -216,10 +216,12 @@ async def get_media_response(
     )
 
   file_size = media.file_size
-  mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
   file_name = (
       getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
   )
+
+  # Explicit video MIME type for HTML5 player support
+  mime_type = "video/mp4"
 
   from_bytes = 0
   until_bytes = file_size - 1
@@ -230,8 +232,7 @@ async def get_media_response(
       start = range_match.group(1)
       end = range_match.group(2)
       from_bytes = int(start) if start else 0
-      if end:
-        until_bytes = min(int(end), file_size - 1)
+      until_bytes = int(end) if end else file_size - 1
 
   chunk_length = until_bytes - from_bytes + 1
 
@@ -251,6 +252,9 @@ async def get_media_response(
       "Content-Type": mime_type,
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Headers": "*",
+      "Access-Control-Expose-Headers": (
+          "Content-Range, Content-Length, Accept-Ranges"
+      ),
       "Cache-Control": "no-cache",
   }
 
@@ -286,5 +290,5 @@ async def download_video(
 
 @app.get("/")
 def home():
-  return {"status": "SevenAnime Universal Engine Active 🚀"}
+  return {"status": "SevenAnime Engine Active 🚀"}
     
