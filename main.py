@@ -16,7 +16,7 @@ BOT_TOKEN = os.getenv(
 )
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-CHANNEL_IDS = os.getenv("CHANNEL_ID", "-1004315586873").split(",")
+CHANNEL_IDS = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918").split(",")
 
 pyro_client = None
 anime_database = {}
@@ -51,7 +51,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     raw_title = lines[0] if lines else "Unknown Anime"
 
-  # Clean noise words from Title (e.g., "in hindi dubbed", "1080p", "Official")
+  # Clean noise words from Title
   clean_title = re.sub(
       r"(?i)\b(in|hindi|dubbed|dub|sub|official|1080p|720p|480p|fhd|hd|hevc|x264|x265|episode|season|language|quality|main channel)\b",
       "",
@@ -91,6 +91,15 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 async def auto_scan_channels():
   print("🔍 Auto Scanning Telegram Channels for All Animes...")
+
+  # Peer Cache Warmup to prevent 'Peer id invalid'
+  try:
+    print("🔄 Caching channel access hashes...")
+    async for _ in pyro_client.get_dialogs():
+      pass
+  except Exception as e:
+    print(f"⚠️ Dialogs cache warning: {e}")
+
   for ch_id in CHANNEL_IDS:
     ch_id = ch_id.strip()
     if not ch_id:
@@ -99,8 +108,12 @@ async def auto_scan_channels():
       target_chat = (
           int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else ch_id
       )
+
+      chat_info = await pyro_client.get_chat(target_chat)
+
+      # limit=0 means UNLIMITED scanning (saari purani & nayi videos scan hongi)
       async for message in pyro_client.get_chat_history(
-          target_chat, limit=300
+          chat_info.id, limit=0
       ):
         media = message.video or message.document
         if media:
@@ -110,7 +123,7 @@ async def auto_scan_channels():
               if message.forward_from_chat
               else (message.forward_sender_name or "")
           )
-          add_to_database(str(target_chat), message.id, caption, forward_title)
+          add_to_database(str(chat_info.id), message.id, caption, forward_title)
       print(f"✅ Channel {ch_id} scanned successfully!")
     except Exception as e:
       print(f"⚠️ Error scanning channel {ch_id}: {e}")
@@ -129,7 +142,40 @@ async def lifespan(app: FastAPI):
       in_memory=True,
   )
 
-  @pyro_client.on_message(filters.video | filters.document)
+  # ---------------------------------------------------------
+  # BOT COMMAND HANDLERS
+  # ---------------------------------------------------------
+  @pyro_client.on_message(filters.command("start"))
+  async def start_cmd(client, message):
+    await message.reply_text(
+        "👋 **Namaste! Welcome to SevenAnime Engine Bot**\n\n"
+        "Mai aapki Telegram channel ki anime videos ko Web Player aur Website se connect karta hu.\n\n"
+        "🛠 **Commands:**\n"
+        "• `/start` - Check bot status\n"
+        "• `/stats` - Total indexed anime and episode count\n\n"
+        "📌 **How to use:** Channel me video upload karo, mai automatically Stream link generate kar dunga!",
+        quote=True,
+    )
+
+  @pyro_client.on_message(filters.command("stats"))
+  async def stats_cmd(client, message):
+    total_anime = len(anime_database)
+    total_eps = sum(
+        len(ep_list)
+        for anime in anime_database.values()
+        for ep_list in anime.get("seasons", {}).values()
+    )
+    await message.reply_text(
+        f"📊 **Database Statistics:**\n\n"
+        f"⛩️ **Total Anime:** `{total_anime}`\n"
+        f"🎬 **Total Episodes:** `{total_eps}`",
+        quote=True,
+    )
+
+  # ---------------------------------------------------------
+  # AUTO LINK GENERATOR FOR MEDIA
+  # ---------------------------------------------------------
+  @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats"]))
   async def auto_link_gen(client, message):
     media = message.video or message.document
     if not media:
@@ -212,7 +258,8 @@ async def get_media_response(
     target_id = (
         int(chat_id) if (chat_id.startswith("-") or chat_id.isdigit()) else chat_id
     )
-    msg = await pyro_client.get_messages(target_id, message_id)
+    chat_obj = await pyro_client.get_chat(target_id)
+    msg = await pyro_client.get_messages(chat_obj.id, message_id)
   except Exception as e:
     raise HTTPException(
         status_code=404, detail=f"Video message nahi mila: {str(e)}"
@@ -243,10 +290,13 @@ async def get_media_response(
 
   chunk_length = until_bytes - from_bytes + 1
 
+  # Convert bytes into 1MB chunks for Pyrogram stream_media offset
+  chunk_offset = from_bytes // (1024 * 1024)
+
   async def media_streamer():
     try:
       async for chunk in pyro_client.stream_media(
-          msg, offset=from_bytes, limit=chunk_length
+          msg, offset=chunk_offset
       ):
         yield chunk
     except Exception as e:
