@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import json
 import os
 import re
 from urllib.parse import quote
@@ -15,8 +16,28 @@ BOT_TOKEN = os.getenv(
 )
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
+DB_FILE = "anime_db.json"
 pyro_client = None
 anime_database = {}
+
+
+def load_db():
+  global anime_database
+  if os.path.exists(DB_FILE):
+    try:
+      with open(DB_FILE, "r") as f:
+        anime_database = json.load(f)
+      print("Database loaded successfully!")
+    except Exception as e:
+      print(f"Error loading DB: {e}")
+
+
+def save_db():
+  try:
+    with open(DB_FILE, "w") as f:
+      json.dump(anime_database, f, indent=2)
+  except Exception as e:
+    print(f"Error saving DB: {e}")
 
 
 def parse_anime_info(caption: str, forward_title: str = ""):
@@ -25,7 +46,6 @@ def parse_anime_info(caption: str, forward_title: str = ""):
   explicit_name = re.search(
       r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE
   )
-
   season_match = re.search(
       r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE
   )
@@ -61,7 +81,8 @@ def parse_anime_info(caption: str, forward_title: str = ""):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   global pyro_client
-  print("Starting Pyrogram SevenAnime Fast Engine...")
+  print("Starting Pyrogram Engine...")
+  load_db()
 
   pyro_client = Client(
       "sevenanime_bot_session",
@@ -73,10 +94,7 @@ async def lifespan(app: FastAPI):
 
   @pyro_client.on_message(filters.command("start"))
   async def start_cmd(client, message):
-    await message.reply_text(
-        "👋 **SevenAnime Bot Active Hai!**\n\nVideo upload/forward karo,"
-        " links auto sync honge!"
-    )
+    await message.reply_text("👋 SevenAnime Bot Active Hai!")
 
   @pyro_client.on_message(filters.video | filters.document)
   async def auto_link_gen(client, message):
@@ -88,16 +106,12 @@ async def lifespan(app: FastAPI):
     msg_id = message.id
     base_url = APP_URL.rstrip("/")
 
-    file_name = (
-        getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
+    caption = message.caption or ""
+    forward_title = (
+        message.forward_from_chat.title
+        if message.forward_from_chat
+        else (message.forward_sender_name or "")
     )
-    caption = message.caption or file_name
-
-    forward_title = ""
-    if message.forward_from_chat and message.forward_from_chat.title:
-      forward_title = message.forward_from_chat.title
-    elif message.forward_sender_name:
-      forward_title = message.forward_sender_name
 
     anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
     slug_key = anime_name.lower().replace(" ", "_")
@@ -112,6 +126,7 @@ async def lifespan(app: FastAPI):
 
     ep_list = anime_database[slug_key]["seasons"][season_num]
     existing_ep = next((item for item in ep_list if item["ep"] == ep_num), None)
+
     if existing_ep:
       existing_ep["chat_id"] = chat_id
       existing_ep["msg_id"] = msg_id
@@ -119,27 +134,27 @@ async def lifespan(app: FastAPI):
       ep_list.append({"ep": ep_num, "chat_id": chat_id, "msg_id": msg_id})
       ep_list.sort(key=lambda x: x["ep"])
 
+    save_db()
+
     stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
     download_url = f"{base_url}/download/{chat_id}/{msg_id}"
 
-    if chat_id.startswith("-100"):
-      clean_chat_id = chat_id[4:]
-      tg_post_link = f"https://t.me/c/{clean_chat_id}/{msg_id}"
-    else:
-      tg_post_link = getattr(message, "link", "N/A")
-
     await message.reply_text(
-        f"🎬 **SevenAnime Media Processed!**\n\n"
-        f"⛩️ **Anime Name:** `{anime_name}`\n"
-        f"🌀 **Season:** `{season_num}` | 📌 **Episode:** `{ep_num}`\n\n"
-        f"🔍 **Verify Post:** {tg_post_link}\n\n"
-        f"📺 **Stream URL:** `{stream_url}`\n"
-        f"📥 **Download URL:** `{download_url}`",
+        f"🎬 **Added Episode {ep_num} for {anime_name}!**\n\n"
+        f"📺 **Stream:** `{stream_url}`\n"
+        f"📥 **Download:** `{download_url}`",
         quote=True,
-        disable_web_page_preview=True,
     )
 
   await pyro_client.start()
+
+  # Bot peer cache sync to fix Peer ID invalid error
+  try:
+    async for dialog in pyro_client.get_dialogs(limit=50):
+      pass
+  except Exception as e:
+    print(f"Dialog sync log: {e}")
+
   print("SevenAnime Engine Live!")
   yield
   await pyro_client.stop()
@@ -162,21 +177,14 @@ def get_anime_episodes(anime_slug: str):
   if slug in anime_database:
     return anime_database[slug]
 
-  if "solo_leveling" in slug:
-    return {
-        "title": "Solo Leveling (Hindi Official Audio)",
-        "seasons": {
-            "1": [
-                {"ep": 1, "chat_id": "-1004315586873", "msg_id": 80},
-                {"ep": 2, "chat_id": "-1004315586873", "msg_id": 81},
-            ]
-        },
-    }
+  # Search fuzzy match
+  for key in anime_database:
+    if slug in key or key in slug:
+      return anime_database[key]
 
   return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
 
-# Fast & Reliable Byte-Range Streaming Handler
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -188,11 +196,18 @@ async def get_media_response(
     raise HTTPException(status_code=503, detail="Telegram engine offline hai.")
 
   try:
-    msg = await pyro_client.get_messages(int(chat_id), message_id)
-  except Exception as e:
-    raise HTTPException(
-        status_code=404, detail=f"Video message nahi mila: {str(e)}"
-    )
+    target_id = int(chat_id)
+    msg = await pyro_client.get_messages(target_id, message_id)
+  except Exception:
+    try:
+      # Refetch chat entity if peer invalid error occurs
+      chat_obj = await pyro_client.get_chat(target_id)
+      msg = await pyro_client.get_messages(chat_obj.id, message_id)
+    except Exception as e:
+      raise HTTPException(
+          status_code=404,
+          detail=f"Video message nahi mila. Bot ko channel me Admin banayein: {str(e)}",
+      )
 
   media = msg.video or msg.document
   if not media:
@@ -218,7 +233,6 @@ async def get_media_response(
       if end:
         until_bytes = min(int(end), file_size - 1)
 
-  # Chunk limit optimization for smooth web playback
   chunk_length = until_bytes - from_bytes + 1
 
   async def media_streamer():
@@ -228,7 +242,7 @@ async def get_media_response(
       ):
         yield chunk
     except Exception as e:
-      print(f"Streaming Chunk Error: {e}")
+      print(f"Streaming Error: {e}")
 
   headers = {
       "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
