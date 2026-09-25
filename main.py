@@ -100,19 +100,30 @@ async def auto_scan_channels():
             except Exception:
                 chat_target_id = target_chat
 
-            async for message in pyro_client.get_chat_history(chat_target_id, limit=300):
-                media = message.video or message.document
-                if media:
-                    caption = message.caption or getattr(media, "file_name", "") or ""
-                    forward_title = (
-                        message.forward_from_chat.title
-                        if message.forward_from_chat
-                        else (message.forward_sender_name or "")
-                    )
-                    add_to_database(str(chat_target_id), message.id, caption, forward_title)
+            # Bot API Fix: get_messages in batches instead of get_chat_history
+            batch_size = 100
+            for start_id in range(1, 301, batch_size):
+                msg_ids = list(range(start_id, start_id + batch_size))
+                try:
+                    messages = await pyro_client.get_messages(chat_target_id, msg_ids)
+                    if not messages:
+                        continue
+                    if not isinstance(messages, list):
+                        messages = [messages]
+
+                    for message in messages:
+                        if message and (message.video or message.document):
+                            caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
+                            forward_title = (
+                                message.forward_from_chat.title
+                                if message.forward_from_chat
+                                else (message.forward_sender_name or "")
+                            )
+                            add_to_database(str(chat_target_id), message.id, caption, forward_title)
+                except Exception as batch_err:
+                    pass
+
             print(f"✅ Channel '{target_chat}' scanned successfully!")
-        except (PeerIdInvalid, ChannelInvalid) as e:
-            print(f"⚠️ Peer ID issue for {ch_id}. Ensure bot is admin or use channel username!")
         except Exception as e:
             print(f"⚠️ Error scanning channel {ch_id}: {e}")
 
@@ -318,4 +329,4 @@ async def download_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
 ):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-            
+        
