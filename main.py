@@ -28,15 +28,12 @@ anime_database = {}
 def parse_anime_info(caption: str, forward_title: str = ""):
     text = caption or ""
 
-    # 1. Season Extraction
     season_match = re.search(r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     season = season_match.group(1) if season_match else "1"
 
-    # 2. Episode Extraction
     ep_match = re.search(r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     episode = int(ep_match.group(1)) if ep_match else 1
 
-    # 3. Dynamic Anime Title Cleaning
     explicit_name = re.search(r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE)
 
     if explicit_name:
@@ -236,7 +233,6 @@ def get_anime_episodes(anime_slug: str):
 
     return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
-# Streaming engine combining HTML5 browser headers and exact byte offset seeking
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -260,7 +256,6 @@ async def get_media_response(
     file_size = media.file_size
     file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
     
-    # Browser HTML5 Video Compatibility MIME Type
     mime_type = "video/mp4" if not is_download else "application/octet-stream"
 
     from_bytes = 0
@@ -279,13 +274,21 @@ async def get_media_response(
     bytes_to_skip = from_bytes % (1024 * 1024)
 
     async def media_streamer():
+        bytes_sent = 0
         try:
             first_chunk = True
             async for chunk in pyro_client.stream_media(msg, offset=chunk_offset):
                 if first_chunk and bytes_to_skip > 0:
                     chunk = chunk[bytes_to_skip:]
                     first_chunk = False
+
+                remaining = chunk_length - bytes_sent
+                if len(chunk) >= remaining:
+                    yield chunk[:remaining]
+                    break
+
                 yield chunk
+                bytes_sent += len(chunk)
         except Exception as e:
             print(f"Streaming Error: {e}")
 
@@ -320,4 +323,4 @@ async def download_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
 ):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-                                      
+    
