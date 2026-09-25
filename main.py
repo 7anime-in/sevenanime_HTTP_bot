@@ -1,26 +1,31 @@
-from contextlib import asynccontextmanager
-import json
 import os
 import re
+import asyncio
 from urllib.parse import quote
-from fastapi import FastAPI, Header, HTTPException, Request
+from typing import Dict, Any, Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+
 from pyrogram import Client, filters
 from pyrogram.errors import PeerIdInvalid, ChannelInvalid, RPCError
 
-# Environment Variables
+# ==================== ENVIRONMENT VARIABLES ====================
 API_ID = int(os.getenv("API_ID", "31169133"))
 API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8895047045:AAE6uBXrMfsHy_OwW_Jx-3OegdzOpndzSWA")
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-CHANNEL_IDS = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918").split(",")
+# Channel list: Handles both numeric IDs and Usernames (e.g., "-1004315586873,sevenanime_ch1")
+CHANNEL_INPUT = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918,sevenanime_ch1")
+CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
 
 pyro_client = None
 anime_database = {}
 
-
+# ==================== PARSING & DATABASE LOGIC ====================
 def parse_anime_info(caption: str, forward_title: str = ""):
     text = caption or ""
 
@@ -84,20 +89,18 @@ async def auto_scan_channels():
     print("🔍 Auto Scanning Telegram Channels for All Animes...")
 
     for ch_id in CHANNEL_IDS:
-        ch_id = ch_id.strip()
         if not ch_id:
             continue
         try:
             target_chat = int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else ch_id
             
-            # Fetch chat info to cache peer hash automatically
             try:
                 chat_obj = await pyro_client.get_chat(target_chat)
-                chat_target_id = chat_obj.id
+                chat_target_id = chat_obj.username if chat_obj.username else chat_obj.id
             except Exception:
                 chat_target_id = target_chat
 
-            async for message in pyro_client.get_chat_history(chat_target_id, limit=0):
+            async for message in pyro_client.get_chat_history(chat_target_id, limit=300):
                 media = message.video or message.document
                 if media:
                     caption = message.caption or getattr(media, "file_name", "") or ""
@@ -109,17 +112,16 @@ async def auto_scan_channels():
                     add_to_database(str(chat_target_id), message.id, caption, forward_title)
             print(f"✅ Channel '{target_chat}' scanned successfully!")
         except (PeerIdInvalid, ChannelInvalid) as e:
-            print(f"⚠️ Peer hash missing for {ch_id}. Please post or forward 1 message in channel so bot caches peer!")
+            print(f"⚠️ Peer ID issue for {ch_id}. Ensure bot is admin or use channel username!")
         except Exception as e:
             print(f"⚠️ Error scanning channel {ch_id}: {e}")
 
-
+# ==================== LIFECYCLE & BOT HANDLERS ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pyro_client
     print("Starting Pyrogram Engine...")
 
-    # Session file storage enabled (in_memory=True removed for persistent peer caching)
     pyro_client = Client(
         "sevenanime_bot_session",
         api_id=API_ID,
@@ -153,14 +155,14 @@ async def lifespan(app: FastAPI):
             quote=True,
         )
 
-    # Auto-cache peer and auto-link generation
+    # Auto link generation on new video upload
     @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats"]))
     async def auto_link_gen(client, message):
         media = message.video or message.document
         if not media:
             return
 
-        chat_id = str(message.chat.id)
+        chat_id = str(message.chat.username if message.chat.username else message.chat.id)
         msg_id = message.id
         base_url = APP_URL.rstrip("/")
 
@@ -187,13 +189,13 @@ async def lifespan(app: FastAPI):
         )
 
     await pyro_client.start()
-    await auto_scan_channels()
+    asyncio.create_task(auto_scan_channels())
     print("SevenAnime Engine Live!")
     yield
     await pyro_client.stop()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="SevenAnime Engine", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -204,11 +206,15 @@ app.add_middleware(
     expose_headers=["Content-Range", "Content-Length", "Accept-Ranges"],
 )
 
+# ==================== FASTAPI ENDPOINTS ====================
+
+@app.api_route("/", methods=["GET", "HEAD"])
+def home():
+    return {"status": "SevenAnime Engine Active 🚀"}
 
 @app.get("/api/all-anime")
 def get_all_anime():
     return anime_database
-
 
 @app.get("/api/episodes/{anime_slug}")
 def get_anime_episodes(anime_slug: str):
@@ -222,7 +228,7 @@ def get_anime_episodes(anime_slug: str):
 
     return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
-
+# Stream & Download Media Streamer Engine
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -312,9 +318,4 @@ async def download_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
 ):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-
-
-@app.get("/")
-def home():
-    return {"status": "SevenAnime Engine Active 🚀"}
-        
+            
