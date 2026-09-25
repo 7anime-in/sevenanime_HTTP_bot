@@ -18,7 +18,6 @@ API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8895047045:AAE6uBXrMfsHy_OwW_Jx-3OegdzOpndzSWA")
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-# Channel list: Handles both numeric IDs and Usernames (e.g., "-1004315586873,sevenanime_ch1")
 CHANNEL_INPUT = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918,sevenanime_ch1")
 CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
 
@@ -100,7 +99,6 @@ async def auto_scan_channels():
             except Exception:
                 chat_target_id = target_chat
 
-            # Bot API Fix: get_messages in batches instead of get_chat_history
             batch_size = 100
             for start_id in range(1, 301, batch_size):
                 msg_ids = list(range(start_id, start_id + batch_size))
@@ -120,7 +118,7 @@ async def auto_scan_channels():
                                 else (message.forward_sender_name or "")
                             )
                             add_to_database(str(chat_target_id), message.id, caption, forward_title)
-                except Exception as batch_err:
+                except Exception:
                     pass
 
             print(f"✅ Channel '{target_chat}' scanned successfully!")
@@ -166,7 +164,6 @@ async def lifespan(app: FastAPI):
             quote=True,
         )
 
-    # Auto link generation on new video upload
     @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats"]))
     async def auto_link_gen(client, message):
         media = message.video or message.document
@@ -239,7 +236,7 @@ def get_anime_episodes(anime_slug: str):
 
     return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
-# Stream & Download Media Streamer Engine
+# Streaming engine combining HTML5 browser headers and exact byte offset seeking
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -263,14 +260,8 @@ async def get_media_response(
     file_size = media.file_size
     file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
     
-    # Precise Dynamic MIME Type Detection
-    raw_mime = getattr(media, "mime_type", "") or ""
-    if file_name.lower().endswith(".mkv") or "matroska" in raw_mime:
-        mime_type = "video/x-matroska"
-    elif file_name.lower().endswith(".webm") or "webm" in raw_mime:
-        mime_type = "video/webm"
-    else:
-        mime_type = raw_mime if raw_mime else "video/mp4"
+    # Browser HTML5 Video Compatibility MIME Type
+    mime_type = "video/mp4" if not is_download else "application/octet-stream"
 
     from_bytes = 0
     until_bytes = file_size - 1
@@ -329,4 +320,4 @@ async def download_video(
     chat_id: str, message_id: int, request: Request, range: str = Header(None)
 ):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-        
+                                      
