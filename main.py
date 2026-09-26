@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client, filters
-from pyrogram.errors import PeerIdInvalid, ChannelInvalid, RPCError
+from pyrogram.errors import PeerIdInvalid, ChannelInvalid, RPCError, FloodWait
 
 # ==================== ENVIRONMENT VARIABLES ====================
 API_ID = int(os.getenv("API_ID", "31169133"))
@@ -27,6 +27,13 @@ anime_database = {}
 # ==================== PARSING & DATABASE LOGIC ====================
 def parse_anime_info(caption: str, forward_title: str = ""):
     text = caption or ""
+
+    # Official vs Unofficial/Fandub Detection
+    dub_type = "official"
+    if re.search(r"\b(unofficial|fandub|fan_dub|fan-dub|fan dub)\b", text, re.IGNORECASE) or "#unofficial" in text.lower() or "#fandub" in text.lower():
+        dub_type = "unofficial"
+    elif "#official" in text.lower():
+        dub_type = "official"
 
     season_match = re.search(r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     season = season_match.group(1) if season_match else "1"
@@ -45,7 +52,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
         raw_title = lines[0] if lines else "Unknown Anime"
 
     clean_title = re.sub(
-        r"(?i)\b(in|hindi|dubbed|dub|sub|official|1080p|720p|480p|fhd|hd|hevc|x264|x265|episode|season|language|quality|main channel)\b",
+        r"(?i)\b(in|hindi|dubbed|dub|sub|official|unofficial|fandub|1080p|720p|480p|fhd|hd|hevc|x264|x265|episode|season|language|quality|main channel)\b",
         "",
         raw_title,
     )
@@ -55,11 +62,11 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     if not clean_title or len(clean_title) < 2:
         clean_title = "Solo Leveling"
 
-    return clean_title, str(int(season)), episode
+    return clean_title, str(int(season)), episode, dub_type
 
 
 def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str):
-    anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
+    anime_name, season_num, ep_num, dub_type = parse_anime_info(caption, forward_title)
     slug_key = anime_name.lower().replace(" ", "_")
 
     if slug_key not in anime_database:
@@ -71,54 +78,72 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
         anime_database[slug_key]["seasons"][season_num] = []
 
     ep_list = anime_database[slug_key]["seasons"][season_num]
-    existing_ep = next((item for item in ep_list if item["ep"] == ep_num), None)
+    
+    existing_ep = next((item for item in ep_list if item["ep"] == ep_num and item.get("type", "official") == dub_type), None)
+
+    formatted_chat_id = chat_id if chat_id.startswith("-") or chat_id.startswith("@") or chat_id.isdigit() else f"@{chat_id}"
 
     if existing_ep:
-        existing_ep["chat_id"] = str(chat_id)
+        existing_ep["chat_id"] = str(formatted_chat_id)
         existing_ep["msg_id"] = msg_id
     else:
-        ep_list.append({"ep": ep_num, "chat_id": str(chat_id), "msg_id": msg_id})
+        ep_list.append({
+            "ep": ep_num,
+            "chat_id": str(formatted_chat_id),
+            "msg_id": msg_id,
+            "type": dub_type
+        })
         ep_list.sort(key=lambda x: x["ep"])
 
 
 async def auto_scan_channels():
-    print("🔍 Auto Scanning Telegram Channels for All Animes...")
+    print("🔍 Auto Scanning Telegram Channels (Using Batch ID Scan - Bypassing Bot Limits)...")
 
     for ch_id in CHANNEL_IDS:
         if not ch_id:
             continue
         try:
-            target_chat = int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else ch_id
+            target_chat = int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else (ch_id if ch_id.startswith("@") else f"@{ch_id}")
             
-            try:
-                chat_obj = await pyro_client.get_chat(target_chat)
-                chat_target_id = chat_obj.username if chat_obj.username else chat_obj.id
-            except Exception:
-                chat_target_id = target_chat
+            # Message ID Batch Fetching (Bypasses get_chat_history restrictions)
+            chunk_size = 100
+            current_id = 1
+            empty_count = 0
 
-            batch_size = 100
-            for start_id in range(1, 301, batch_size):
-                msg_ids = list(range(start_id, start_id + batch_size))
+            while empty_count < 5:  # Continues scanning until 5 consecutive empty chunks
+                msg_ids = list(range(current_id, current_id + chunk_size))
                 try:
-                    messages = await pyro_client.get_messages(chat_target_id, msg_ids)
-                    if not messages:
-                        continue
-                    if not isinstance(messages, list):
-                        messages = [messages]
+                    messages = await pyro_client.get_messages(target_chat, msg_ids)
+                    has_media_in_chunk = False
 
-                    for message in messages:
-                        if message and (message.video or message.document):
-                            caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
-                            forward_title = (
-                                message.forward_from_chat.title
-                                if message.forward_from_chat
-                                else (message.forward_sender_name or "")
-                            )
-                            add_to_database(str(chat_target_id), message.id, caption, forward_title)
-                except Exception:
-                    pass
+                    if messages:
+                        for message in messages:
+                            if message and not message.empty:
+                                has_media_in_chunk = True
+                                if message.video or message.document:
+                                    caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
+                                    forward_title = (
+                                        message.forward_from_chat.title
+                                        if message.forward_from_chat
+                                        else (message.forward_sender_name or "")
+                                    )
+                                    add_to_database(str(target_chat), message.id, caption, forward_title)
 
-            print(f"✅ Channel '{target_chat}' scanned successfully!")
+                    if not has_media_in_chunk:
+                        empty_count += 1
+                    else:
+                        empty_count = 0
+
+                    current_id += chunk_size
+                    await asyncio.sleep(0.1)  # Smooth delay to prevent rate limits
+
+                except FloodWait as e:
+                    await asyncio.sleep(e.value + 1)
+                except Exception as e:
+                    print(f"Batch fetch info at ID {current_id}: {e}")
+                    current_id += chunk_size
+
+            print(f"✅ Channel '{target_chat}' scanned completely!")
         except Exception as e:
             print(f"⚠️ Error scanning channel {ch_id}: {e}")
 
@@ -167,7 +192,8 @@ async def lifespan(app: FastAPI):
         if not media:
             return
 
-        chat_id = str(message.chat.username if message.chat.username else message.chat.id)
+        chat = message.chat
+        chat_identifier = f"@{chat.username}" if chat.username else str(chat.id)
         msg_id = message.id
         base_url = APP_URL.rstrip("/")
 
@@ -178,15 +204,16 @@ async def lifespan(app: FastAPI):
             else (message.forward_sender_name or "")
         )
 
-        add_to_database(chat_id, msg_id, caption, forward_title)
+        add_to_database(chat_identifier, msg_id, caption, forward_title)
 
-        anime_name, season_num, ep_num = parse_anime_info(caption, forward_title)
-        stream_url = f"{base_url}/stream/{chat_id}/{msg_id}"
-        download_url = f"{base_url}/download/{chat_id}/{msg_id}"
+        anime_name, season_num, ep_num, dub_type = parse_anime_info(caption, forward_title)
+        stream_url = f"{base_url}/stream/{chat_identifier}/{msg_id}"
+        download_url = f"{base_url}/download/{chat_identifier}/{msg_id}"
 
         await message.reply_text(
             f"🎬 **Added to Database!**\n\n"
             f"⛩️ **Anime:** `{anime_name}`\n"
+            f"🎙️ **Type:** `{dub_type.upper()}`\n"
             f"📦 **Season:** `{season_num}` | **Episode:** `{ep_num}`\n"
             f"📺 **Stream:** `{stream_url}`\n"
             f"📥 **Download:** `{download_url}`",
@@ -244,7 +271,7 @@ async def get_media_response(
         raise HTTPException(status_code=503, detail="Telegram engine offline hai.")
 
     try:
-        target_id = int(chat_id) if (chat_id.startswith("-") or chat_id.isdigit()) else chat_id
+        target_id = int(chat_id) if (chat_id.startswith("-") or chat_id.isdigit()) else (chat_id if chat_id.startswith("@") else f"@{chat_id}")
         msg = await pyro_client.get_messages(target_id, message_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Video message nahi mila: {str(e)}")
@@ -310,17 +337,11 @@ async def get_media_response(
     status_code = 206 if range_header else 200
     return StreamingResponse(media_streamer(), status_code=status_code, headers=headers)
 
-
 @app.get("/stream/{chat_id}/{message_id}")
-async def stream_video(
-    chat_id: str, message_id: int, request: Request, range: str = Header(None)
-):
+async def stream_video(chat_id: str, message_id: int, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=False)
 
-
 @app.get("/download/{chat_id}/{message_id}")
-async def download_video(
-    chat_id: str, message_id: int, request: Request, range: str = Header(None)
-):
+async def download_video(chat_id: str, message_id: int, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
     
