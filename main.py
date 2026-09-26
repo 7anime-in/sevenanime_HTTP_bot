@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client, filters
@@ -234,7 +234,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Range", "Content-Length", "Accept-Ranges"],
+    expose_headers=["Content-Range", "Content-Length", "Accept-Ranges", "Content-Type", "Content-Disposition"],
 )
 
 # ==================== FASTAPI ENDPOINTS ====================
@@ -259,6 +259,7 @@ def get_anime_episodes(anime_slug: str):
 
     return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
 
+
 async def get_media_response(
     chat_id: str,
     message_id: int,
@@ -281,12 +282,6 @@ async def get_media_response(
 
     file_size = media.file_size
     file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
-    
-    # Strictly set MIME type for MP4 streaming
-    if is_download:
-        mime_type = "application/octet-stream"
-    else:
-        mime_type = "video/mp4"
 
     from_bytes = 0
     until_bytes = file_size - 1
@@ -300,6 +295,30 @@ async def get_media_response(
             until_bytes = int(end) if end else file_size - 1
 
     chunk_length = until_bytes - from_bytes + 1
+
+    if is_download:
+        mime_type = "application/octet-stream"
+        disposition = f"attachment; filename*=UTF-8''{quote(file_name)}"
+    else:
+        mime_type = "video/mp4"
+        disposition = "inline"
+
+    headers = {
+        "Content-Type": mime_type,
+        "Content-Disposition": disposition,
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+        "Content-Length": str(chunk_length),
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition",
+        "Cache-Control": "no-cache",
+    }
+
+    # Browser ki HEAD Request Fix (Stream start hone se pehle browser video details check karta hai)
+    if request.method == "HEAD":
+        return Response(status_code=206 if range_header else 200, headers=headers)
+
     chunk_offset = from_bytes // (1024 * 1024)
     bytes_to_skip = from_bytes % (1024 * 1024)
 
@@ -322,35 +341,16 @@ async def get_media_response(
         except Exception as e:
             print(f"Streaming Error: {e}")
 
-    headers = {
-        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(chunk_length),
-        "Content-Type": mime_type,
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges",
-        "Cache-Control": "no-cache",
-    }
-
-    if is_download:
-        encoded_filename = quote(file_name)
-        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_filename}"
-    else:
-        # Proper Inline Header to force HTML5 browser streaming instead of downloading as .bin
-        clean_name = re.sub(r'[^\w\.\-]', '_', file_name)
-        if not clean_name.lower().endswith('.mp4'):
-            clean_name += '.mp4'
-        headers["Content-Disposition"] = f'inline; filename="{clean_name}"'
-
     status_code = 206 if range_header else 200
     return StreamingResponse(media_streamer(), status_code=status_code, headers=headers)
 
-@app.get("/stream/{chat_id}/{message_id}")
+
+# HEAD + GET support endpoints par fix ke liye
+@app.api_route("/stream/{chat_id}/{message_id}", methods=["GET", "HEAD"])
 async def stream_video(chat_id: str, message_id: int, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=False)
 
-@app.get("/download/{chat_id}/{message_id}")
+@app.api_route("/download/{chat_id}/{message_id}", methods=["GET", "HEAD"])
 async def download_video(chat_id: str, message_id: int, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
     
