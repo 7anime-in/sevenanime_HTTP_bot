@@ -28,6 +28,7 @@ anime_database = {}
 def parse_anime_info(caption: str, forward_title: str = ""):
     text = caption or ""
 
+    # Official vs Unofficial/Fandub Detection
     dub_type = "official"
     if re.search(r"\b(unofficial|fandub|fan_dub|fan-dub|fan dub)\b", text, re.IGNORECASE) or "#unofficial" in text.lower() or "#fandub" in text.lower():
         dub_type = "unofficial"
@@ -96,7 +97,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 
 async def auto_scan_channels():
-    print("🔍 Auto Scanning Telegram Channels...")
+    print("🔍 Auto Scanning Telegram Channels (Batch ID Scan - Unlimited Range)...")
 
     for ch_id in CHANNEL_IDS:
         if not ch_id:
@@ -104,12 +105,6 @@ async def auto_scan_channels():
         try:
             target_chat = int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else (ch_id if ch_id.startswith("@") else f"@{ch_id}")
             
-            # Cache peer dialog so Pyrogram doesn't fail on get_messages
-            try:
-                await pyro_client.get_chat(target_chat)
-            except Exception as pe:
-                print(f"Peer warm-up for {target_chat}: {pe}")
-
             chunk_size = 100
             current_id = 1
             empty_count = 0
@@ -211,9 +206,8 @@ async def lifespan(app: FastAPI):
         add_to_database(chat_identifier, msg_id, caption, forward_title)
 
         anime_name, season_num, ep_num, dub_type = parse_anime_info(caption, forward_title)
-        clean_chat = chat_identifier.replace("@", "")
-        stream_url = f"{base_url}/stream/{clean_chat}/{msg_id}"
-        download_url = f"{base_url}/download/{clean_chat}/{msg_id}"
+        stream_url = f"{base_url}/stream/{chat_identifier}/{msg_id}.mp4"
+        download_url = f"{base_url}/download/{chat_identifier}/{msg_id}"
 
         await message.reply_text(
             f"🎬 **Added to Database!**\n\n"
@@ -245,7 +239,7 @@ app.add_middleware(
 
 # ==================== FASTAPI ENDPOINTS ====================
 
-@app.api_route("/", methods=["GET", "HEAD", "OPTIONS"])
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
     return {"status": "SevenAnime Engine Active 🚀"}
 
@@ -268,41 +262,39 @@ def get_anime_episodes(anime_slug: str):
 
 async def get_media_response(
     chat_id: str,
-    message_id: int,
+    message_id: str,
     request: Request,
     range_header: str,
     is_download: bool = False,
 ):
-    if not pyro_client:
-        raise HTTPException(status_code=503, detail="Telegram engine offline hai.")
-
     if request.method == "OPTIONS":
-        return Response(status_code=200, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        })
+        return Response(status_code=200, headers={"Access-Control-Allow-Origin": "*"})
+
+    # Stripping .mp4 if passed in path
+    msg_id_clean = int(str(message_id).replace(".mp4", ""))
+
+    if not pyro_client:
+        if is_download:
+            raise HTTPException(status_code=503, detail="Telegram engine offline hai.")
+        return Response(content=b"", media_type="video/mp4", status_code=503)
 
     try:
-        if chat_id.startswith("-") or chat_id.isdigit():
-            target_id = int(chat_id)
-        else:
-            target_id = chat_id if chat_id.startswith("@") else f"@{chat_id}"
-
-        msg = await pyro_client.get_messages(target_id, message_id)
+        target_id = int(chat_id) if (chat_id.startswith("-") or chat_id.isdigit()) else (chat_id if chat_id.startswith("@") else f"@{chat_id}")
+        msg = await pyro_client.get_messages(target_id, msg_id_clean)
     except Exception as e:
-        print(f"Error fetching msg {chat_id}/{message_id}: {e}")
-        raise HTTPException(status_code=404, detail=f"Video message nahi mila: {str(e)}")
-
-    if not msg or msg.empty:
-        raise HTTPException(status_code=404, detail="Message empty hai ya delete ho chuka hai")
+        if is_download:
+            raise HTTPException(status_code=404, detail=f"Video message nahi mila: {str(e)}")
+        # Web Player par JSON crash & broken icon hone se bachata hai
+        return Response(content=b"", media_type="video/mp4", status_code=404)
 
     media = msg.video or msg.document
     if not media:
-        raise HTTPException(status_code=400, detail="Is message me koi video nahi hai")
+        if is_download:
+            raise HTTPException(status_code=400, detail="Is message me koi video nahi hai")
+        return Response(content=b"", media_type="video/mp4", status_code=400)
 
     file_size = media.file_size
-    file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
+    file_name = getattr(media, "file_name", f"{msg_id_clean}.mp4") or f"{msg_id_clean}.mp4"
 
     from_bytes = 0
     until_bytes = file_size - 1
@@ -322,7 +314,7 @@ async def get_media_response(
         disposition = f"attachment; filename*=UTF-8''{quote(file_name)}"
     else:
         mime_type = "video/mp4"
-        disposition = "inline"
+        disposition = f"inline; filename=\"{file_name}\""
 
     headers = {
         "Content-Type": mime_type,
@@ -347,11 +339,8 @@ async def get_media_response(
         try:
             first_chunk = True
             async for chunk in pyro_client.stream_media(msg, offset=chunk_offset):
-                if not chunk:
-                    continue
-                if first_chunk:
-                    if bytes_to_skip > 0:
-                        chunk = chunk[bytes_to_skip:]
+                if first_chunk and bytes_to_skip > 0:
+                    chunk = chunk[bytes_to_skip:]
                     first_chunk = False
 
                 remaining = chunk_length - bytes_sent
@@ -369,10 +358,12 @@ async def get_media_response(
 
 
 @app.api_route("/stream/{chat_id}/{message_id}", methods=["GET", "HEAD", "OPTIONS"])
-async def stream_video(chat_id: str, message_id: int, request: Request, range: str = Header(None)):
+@app.api_route("/stream/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
+async def stream_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=False)
 
 @app.api_route("/download/{chat_id}/{message_id}", methods=["GET", "HEAD", "OPTIONS"])
-async def download_video(chat_id: str, message_id: int, request: Request, range: str = Header(None)):
+@app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
+async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
     
