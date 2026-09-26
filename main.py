@@ -97,7 +97,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 
 async def auto_scan_channels():
-    print("🔍 Auto Scanning Telegram Channels (Using Batch ID Scan - Bypassing Bot Limits)...")
+    print("🔍 Auto Scanning Telegram Channels (Batch ID Scan - Unlimited Range)...")
 
     for ch_id in CHANNEL_IDS:
         if not ch_id:
@@ -105,12 +105,11 @@ async def auto_scan_channels():
         try:
             target_chat = int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else (ch_id if ch_id.startswith("@") else f"@{ch_id}")
             
-            # Message ID Batch Fetching (Bypasses get_chat_history restrictions)
             chunk_size = 100
             current_id = 1
             empty_count = 0
 
-            while empty_count < 5:  # Continues scanning until 5 consecutive empty chunks
+            while empty_count < 5:
                 msg_ids = list(range(current_id, current_id + chunk_size))
                 try:
                     messages = await pyro_client.get_messages(target_chat, msg_ids)
@@ -135,7 +134,7 @@ async def auto_scan_channels():
                         empty_count = 0
 
                     current_id += chunk_size
-                    await asyncio.sleep(0.1)  # Smooth delay to prevent rate limits
+                    await asyncio.sleep(0.1)
 
                 except FloodWait as e:
                     await asyncio.sleep(e.value + 1)
@@ -283,7 +282,11 @@ async def get_media_response(
     file_size = media.file_size
     file_name = getattr(media, "file_name", "Anime_Video.mp4") or "Anime_Video.mp4"
     
-    mime_type = "video/mp4" if not is_download else "application/octet-stream"
+    # Strictly set MIME type for MP4 streaming
+    if is_download:
+        mime_type = "application/octet-stream"
+    else:
+        mime_type = "video/mp4"
 
     from_bytes = 0
     until_bytes = file_size - 1
@@ -333,6 +336,12 @@ async def get_media_response(
     if is_download:
         encoded_filename = quote(file_name)
         headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_filename}"
+    else:
+        # Proper Inline Header to force HTML5 browser streaming instead of downloading as .bin
+        clean_name = re.sub(r'[^\w\.\-]', '_', file_name)
+        if not clean_name.lower().endswith('.mp4'):
+            clean_name += '.mp4'
+        headers["Content-Disposition"] = f'inline; filename="{clean_name}"'
 
     status_code = 206 if range_header else 200
     return StreamingResponse(media_streamer(), status_code=status_code, headers=headers)
