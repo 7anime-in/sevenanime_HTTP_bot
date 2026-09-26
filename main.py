@@ -24,6 +24,19 @@ CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
 pyro_client = None
 anime_database = {}
 
+# Helper to verify if TG message is valid MP4 / Video
+def is_video_message(message) -> bool:
+    if not message or message.empty:
+        return False
+    if message.video:
+        return True
+    if message.document:
+        mime = (message.document.mime_type or "").lower()
+        fname = (message.document.file_name or "").lower()
+        if mime.startswith("video/") or fname.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
+            return True
+    return False
+
 # ==================== PARSING & DATABASE LOGIC ====================
 def parse_anime_info(caption: str, forward_title: str = ""):
     text = caption or ""
@@ -38,18 +51,28 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     season_match = re.search(r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     season = season_match.group(1) if season_match else "1"
 
+    # Improved Episode Extraction Regex
     ep_match = re.search(r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
+    if not ep_match:
+        # Fallback to standalone episode numbers while ignoring resolution numbers
+        clean_text = re.sub(r"\b(1080p|720p|480p|360p|2160p|x264|x265|hevc|2023|2024|2025|2026)\b", "", text, flags=re.IGNORECASE)
+        ep_match = re.search(r"(?:[\s\-\_\[]|^)0*(\d{1,3})(?:[\s\-\_\]]|$|\.mp4|\.mkv)", clean_text)
+
     episode = int(ep_match.group(1)) if ep_match else 1
 
     explicit_name = re.search(r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE)
 
     if explicit_name:
         raw_title = explicit_name.group(1).strip()
+    elif "solo leveling" in text.lower():
+        raw_title = "Solo Leveling"
+    elif forward_title and "solo leveling" in forward_title.lower():
+        raw_title = "Solo Leveling"
     elif forward_title:
         raw_title = forward_title
     else:
         lines = [l.strip() for l in text.split("\n") if l.strip()]
-        raw_title = lines[0] if lines else "Unknown Anime"
+        raw_title = lines[0] if lines else "Solo Leveling"
 
     clean_title = re.sub(
         r"(?i)\b(in|hindi|dubbed|dub|sub|official|unofficial|fandub|1080p|720p|480p|fhd|hd|hevc|x264|x265|episode|season|language|quality|main channel)\b",
@@ -117,16 +140,15 @@ async def auto_scan_channels():
 
                     if messages:
                         for message in messages:
-                            if message and not message.empty:
+                            if is_video_message(message):
                                 has_media_in_chunk = True
-                                if message.video or message.document:
-                                    caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
-                                    forward_title = (
-                                        message.forward_from_chat.title
-                                        if message.forward_from_chat
-                                        else (message.forward_sender_name or "")
-                                    )
-                                    add_to_database(str(target_chat), message.id, caption, forward_title)
+                                caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
+                                forward_title = (
+                                    message.forward_from_chat.title
+                                    if message.forward_from_chat
+                                    else (message.forward_sender_name or "")
+                                )
+                                add_to_database(str(target_chat), message.id, caption, forward_title)
 
                     if not has_media_in_chunk:
                         empty_count += 1
@@ -187,8 +209,7 @@ async def lifespan(app: FastAPI):
 
     @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats"]))
     async def auto_link_gen(client, message):
-        media = message.video or message.document
-        if not media:
+        if not is_video_message(message):
             return
 
         chat = message.chat
@@ -196,7 +217,7 @@ async def lifespan(app: FastAPI):
         msg_id = message.id
         base_url = APP_URL.rstrip("/")
 
-        caption = message.caption or ""
+        caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
         forward_title = (
             message.forward_from_chat.title
             if message.forward_from_chat
@@ -206,8 +227,9 @@ async def lifespan(app: FastAPI):
         add_to_database(chat_identifier, msg_id, caption, forward_title)
 
         anime_name, season_num, ep_num, dub_type = parse_anime_info(caption, forward_title)
-        stream_url = f"{base_url}/stream/{chat_identifier}/{msg_id}.mp4"
-        download_url = f"{base_url}/download/{chat_identifier}/{msg_id}"
+        clean_chat = chat_identifier.replace("@", "")
+        stream_url = f"{base_url}/stream/{clean_chat}/{msg_id}.mp4"
+        download_url = f"{base_url}/download/{clean_chat}/{msg_id}"
 
         await message.reply_text(
             f"🎬 **Added to Database!**\n\n"
@@ -284,15 +306,14 @@ async def get_media_response(
     except Exception as e:
         if is_download:
             raise HTTPException(status_code=404, detail=f"Video message nahi mila: {str(e)}")
-        # Web Player par JSON crash & broken icon hone se bachata hai
         return Response(content=b"", media_type="video/mp4", status_code=404)
 
-    media = msg.video or msg.document
-    if not media:
+    if not is_video_message(msg):
         if is_download:
-            raise HTTPException(status_code=400, detail="Is message me koi video nahi hai")
+            raise HTTPException(status_code=400, detail="Is message me koi valid video nahi hai")
         return Response(content=b"", media_type="video/mp4", status_code=400)
 
+    media = msg.video or msg.document
     file_size = media.file_size
     file_name = getattr(media, "file_name", f"{msg_id_clean}.mp4") or f"{msg_id_clean}.mp4"
 
@@ -366,4 +387,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-    
+        
