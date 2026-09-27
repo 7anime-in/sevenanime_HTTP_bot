@@ -1,12 +1,19 @@
 import os
 import re
 import asyncio
+
+# 🚨 FIX FOR RUNTIME ERROR: SET EVENT LOOP BEFORE PYROGRAM IMPORT
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from urllib.parse import quote
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import StreamingResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client, filters
@@ -41,7 +48,6 @@ def is_video_message(message) -> bool:
 def parse_anime_info(caption: str, forward_title: str = ""):
     text = caption or ""
 
-    # Official vs Unofficial/Fandub Detection
     dub_type = "official"
     if re.search(r"\b(unofficial|fandub|fan_dub|fan-dub|fan dub)\b", text, re.IGNORECASE) or "#unofficial" in text.lower() or "#fandub" in text.lower():
         dub_type = "unofficial"
@@ -51,11 +57,10 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     season_match = re.search(r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     season = season_match.group(1) if season_match else "1"
 
-    # Improved Episode Extraction Regex
     ep_match = re.search(r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     if not ep_match:
         clean_text = re.sub(r"\b(1080p|720p|480p|360p|2160p|x264|x265|hevc|2023|2024|2025|2026)\b", "", text, flags=re.IGNORECASE)
-        ep_match = re.search(r"(?:[\s\-\_\[]|^)0*(\d{1,3})(?:[\s\-\_\]]|$|\.mp4|\.mkv)", clean_text)
+        ep_match = re.search(r"(?:[\s\-\_\[]\vert{}^)0*(\d{1,3})(?:[\s\-\_\]]|$|\.mp4|\.mkv)", clean_text)
 
     episode = int(ep_match.group(1)) if ep_match else 1
 
@@ -71,7 +76,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
         raw_title = forward_title
     else:
         lines = [l.strip() for l in text.split("\n") if l.strip()]
-        raw_title = lines[0] if lines else "Solo Leveling"
+        raw_title = lines[0] if lines else "Testing Anime"
 
     clean_title = re.sub(
         r"(?i)\b(in|hindi|dubbed|dub|sub|official|unofficial|fandub|1080p|720p|480p|fhd|hd|hevc|x264|x265|episode|season|language|quality|main channel)\b",
@@ -82,7 +87,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     clean_title = re.sub(r"\s+", " ", clean_title).strip().title()
 
     if not clean_title or len(clean_title) < 2:
-        clean_title = "Solo Leveling"
+        clean_title = "Testing Anime"
 
     return clean_title, str(int(season)), episode, dub_type
 
@@ -119,7 +124,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 
 async def auto_scan_channels():
-    print("🔍 Auto Scanning Telegram Channels...")
+    print("🔍 Scanning Telegram Channels...")
 
     for ch_id in CHANNEL_IDS:
         if not ch_id:
@@ -264,6 +269,14 @@ app.add_middleware(
 def home():
     return {"status": "SevenAnime Engine Active 🚀"}
 
+# 🎬 WEB PLAYER ENDPOINT
+@app.get("/player", response_class=HTMLResponse)
+def get_web_player():
+    if os.path.exists("videoplayer.html"):
+        with open("videoplayer.html", "r", encoding="utf-8") as f:
+            return f.read()
+    return "<h2>videoplayer.html file nahi mili! Directory me file check karein.</h2>"
+
 @app.get("/api/all-anime")
 def get_all_anime():
     return anime_database
@@ -291,7 +304,7 @@ async def get_media_response(
     if request.method == "OPTIONS":
         return Response(status_code=200, headers={"Access-Control-Allow-Origin": "*"})
 
-    msg_id_clean = int(str(message_id).replace(".mp4", ""))
+    msg_id_clean = int(str(message_id).replace(".mp4", "").replace(".mkv", ""))
 
     if not pyro_client:
         if is_download:
@@ -353,10 +366,31 @@ async def get_media_response(
     if request.method == "HEAD":
         return Response(status_code=206 if range_header else 200, headers=headers)
 
+    chunk_size = 1024 * 1024
+    start_chunk = from_bytes // chunk_size
+    skip_bytes = from_bytes % chunk_size
+
     async def media_streamer():
+        bytes_sent = 0
+        current_skipped = 0
         try:
-            async for chunk in pyro_client.stream_media(msg):
+            async for chunk in pyro_client.stream_media(msg, offset=start_chunk):
+                if current_skipped < skip_bytes:
+                    if current_skipped + len(chunk) <= skip_bytes:
+                        current_skipped += len(chunk)
+                        continue
+                    else:
+                        needed = skip_bytes - current_skipped
+                        chunk = chunk[needed:]
+                        current_skipped = skip_bytes
+
+                remaining = chunk_length - bytes_sent
+                if len(chunk) >= remaining:
+                    yield chunk[:remaining]
+                    break
+
                 yield chunk
+                bytes_sent += len(chunk)
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -373,4 +407,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-        
+    
