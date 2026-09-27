@@ -54,7 +54,6 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     # Improved Episode Extraction Regex
     ep_match = re.search(r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     if not ep_match:
-        # Fallback to standalone episode numbers while ignoring resolution numbers
         clean_text = re.sub(r"\b(1080p|720p|480p|360p|2160p|x264|x265|hevc|2023|2024|2025|2026)\b", "", text, flags=re.IGNORECASE)
         ep_match = re.search(r"(?:[\s\-\_\[]|^)0*(\d{1,3})(?:[\s\-\_\]]|$|\.mp4|\.mkv)", clean_text)
 
@@ -120,7 +119,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 
 async def auto_scan_channels():
-    print("🔍 Auto Scanning Telegram Channels (Batch ID Scan - Unlimited Range)...")
+    print("🔍 Auto Scanning Telegram Channels...")
 
     for ch_id in CHANNEL_IDS:
         if not ch_id:
@@ -292,7 +291,6 @@ async def get_media_response(
     if request.method == "OPTIONS":
         return Response(status_code=200, headers={"Access-Control-Allow-Origin": "*"})
 
-    # Stripping .mp4 if passed in path
     msg_id_clean = int(str(message_id).replace(".mp4", ""))
 
     if not pyro_client:
@@ -333,6 +331,9 @@ async def get_media_response(
     if is_download:
         mime_type = "application/octet-stream"
         disposition = f"attachment; filename*=UTF-8''{quote(file_name)}"
+    elif file_name.lower().endswith(".mkv"):
+        mime_type = "video/x-matroska"
+        disposition = f"inline; filename=\"{file_name}\""
     else:
         mime_type = "video/mp4"
         disposition = f"inline; filename=\"{file_name}\""
@@ -352,27 +353,12 @@ async def get_media_response(
     if request.method == "HEAD":
         return Response(status_code=206 if range_header else 200, headers=headers)
 
-    chunk_offset = from_bytes // (1024 * 1024)
-    bytes_to_skip = from_bytes % (1024 * 1024)
-
     async def media_streamer():
-        bytes_sent = 0
         try:
-            first_chunk = True
-            async for chunk in pyro_client.stream_media(msg, offset=chunk_offset):
-                if first_chunk and bytes_to_skip > 0:
-                    chunk = chunk[bytes_to_skip:]
-                    first_chunk = False
-
-                remaining = chunk_length - bytes_sent
-                if len(chunk) >= remaining:
-                    yield chunk[:remaining]
-                    break
-
+            async for chunk in pyro_client.stream_media(msg):
                 yield chunk
-                bytes_sent += len(chunk)
-        except Exception as e:
-            print(f"Streaming Error: {e}")
+        except (asyncio.CancelledError, Exception):
+            pass
 
     status_code = 206 if range_header else 200
     return StreamingResponse(media_streamer(), status_code=status_code, headers=headers)
