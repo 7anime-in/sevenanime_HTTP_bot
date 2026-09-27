@@ -25,7 +25,8 @@ API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8895047045:AAE6uBXrMfsHy_OwW_Jx-3OegdzOpndzSWA")
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-CHANNEL_INPUT = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918,sevenanime_ch1")
+# 🔒 Removed hardcoded channel IDs (Reads purely from environment variables)
+CHANNEL_INPUT = os.getenv("CHANNEL_ID", "")
 CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
 
 pyro_client = None
@@ -124,6 +125,10 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
 
 
 async def auto_scan_channels():
+    if not CHANNEL_IDS:
+        print("ℹ️ No CHANNEL_ID set. Skipping channel scan.")
+        return
+
     print("🔍 Scanning Telegram Channels...")
 
     for ch_id in CHANNEL_IDS:
@@ -407,4 +412,3 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-    
