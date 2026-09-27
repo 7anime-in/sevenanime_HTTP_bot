@@ -25,14 +25,12 @@ API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8895047045:AAE6uBXrMfsHy_OwW_Jx-3OegdzOpndzSWA")
 APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
-# 🔒 Removed hardcoded channel IDs (Reads purely from environment variables)
 CHANNEL_INPUT = os.getenv("CHANNEL_ID", "")
 CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
 
 pyro_client = None
 anime_database = {}
 
-# Helper to verify if TG message is valid MP4 / Video
 def is_video_message(message) -> bool:
     if not message or message.empty:
         return False
@@ -277,10 +275,11 @@ def home():
 # 🎬 WEB PLAYER ENDPOINT
 @app.get("/player", response_class=HTMLResponse)
 def get_web_player():
-    if os.path.exists("videoplayer.html"):
-        with open("videoplayer.html", "r", encoding="utf-8") as f:
-            return f.read()
-    return "<h2>videoplayer.html file nahi mili! Directory me file check karein.</h2>"
+    for file_name in ["7anime_videoplayer.html", "videoplayer.html", "7anime_videoplayer_2.html"]:
+        if os.path.exists(file_name):
+            with open(file_name, "r", encoding="utf-8") as f:
+                return f.read()
+    return "<h2>Player HTML file nahi mili! Repo me file ka naam check karein.</h2>"
 
 @app.get("/api/all-anime")
 def get_all_anime():
@@ -412,3 +411,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
+    
