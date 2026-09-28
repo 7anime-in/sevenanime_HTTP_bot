@@ -311,17 +311,14 @@ def get_anime_episodes(anime_slug: str):
     if not anime_database:
         return {"title": anime_slug.replace("_", " ").title(), "seasons": {"1": []}}
 
-    # 1. Exact Key Match
     if anime_slug.lower() in anime_database:
         return anime_database[anime_slug.lower()]
 
-    # 2. Flexible Fuzzy Match
     for key in anime_database:
         clean_key = re.sub(r'[^a-zA-Z0-9]', '', key.lower())
         if clean_query in clean_key or clean_key in clean_query:
             return anime_database[key]
 
-    # Return first anime as fallback if database has entries
     first_anime = list(anime_database.values())[0]
     return first_anime
 
@@ -334,7 +331,7 @@ async def get_media_response(
     is_download: bool = False,
 ):
     if request.method == "OPTIONS":
-        return Response(status_code=200)
+        return Response(status_code=200, headers={"Access-Control-Allow-Origin": "*"})
 
     msg_id_clean = int(str(message_id).replace(".mp4", "").replace(".mkv", ""))
 
@@ -373,15 +370,13 @@ async def get_media_response(
 
     chunk_length = until_bytes - from_bytes + 1
 
+    # FIXED: FORCE VIDEO/MP4 FOR STREAMING
     if is_download:
         mime_type = "application/octet-stream"
         disposition = f"attachment; filename*=UTF-8''{quote(file_name)}"
-    elif file_name.lower().endswith(".mkv"):
-        mime_type = "video/x-matroska"
-        disposition = f"inline; filename=\"{file_name}\""
     else:
         mime_type = "video/mp4"
-        disposition = f"inline; filename=\"{file_name}\""
+        disposition = f"inline; filename=\"{msg_id_clean}.mp4\""
 
     headers = {
         "Content-Type": mime_type,
@@ -389,6 +384,9 @@ async def get_media_response(
         "Accept-Ranges": "bytes",
         "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
         "Content-Length": str(chunk_length),
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition",
         "Cache-Control": "no-cache",
     }
 
@@ -436,3 +434,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
+                                
