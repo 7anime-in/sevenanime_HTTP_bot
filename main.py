@@ -386,22 +386,27 @@ async def get_media_response(
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "*",
         "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition",
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "no-cache",
     }
 
     if request.method == "HEAD":
         return Response(status_code=206 if range_header else 200, headers=headers)
 
-    # 🚀 DATA PACKAGE OPTIMIZATION: 2 MB CHUNK PACKAGES FOR FAST 5G BUFFERING
-    chunk_size = 2 * 1024 * 1024  
+    # ==================== FIXED FAST RANGE STREAMING ====================
+    chunk_size = 1024 * 1024  # 1MB chunk size
     start_chunk = from_bytes // chunk_size
+    end_chunk = until_bytes // chunk_size
     skip_bytes = from_bytes % chunk_size
+
+    # Limit parameter calculated so Pyrogram does not download full 300MB
+    chunks_to_fetch = (end_chunk - start_chunk) + 1
 
     async def media_streamer():
         bytes_sent = 0
         current_skipped = 0
         try:
-            async for chunk in pyro_client.stream_media(msg, offset=start_chunk):
+            # FIXED: Added limit=chunks_to_fetch
+            async for chunk in pyro_client.stream_media(msg, offset=start_chunk, limit=chunks_to_fetch):
                 if current_skipped < skip_bytes:
                     if current_skipped + len(chunk) <= skip_bytes:
                         current_skipped += len(chunk)
@@ -434,4 +439,3 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-    
