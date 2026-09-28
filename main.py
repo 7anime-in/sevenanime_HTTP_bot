@@ -1,12 +1,6 @@
 import os
 import re
 import asyncio
-
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
 from urllib.parse import quote
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
@@ -26,6 +20,11 @@ APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 
 CHANNEL_INPUT = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918,sevenanime_ch1")
 CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
+
+# ==================== CHUNK LIMIT CONFIGURATION (1MB to 10MB) ====================
+MIN_STREAM_CHUNK_SIZE = 1 * 1024 * 1024   # 1 MB Minimum
+MAX_STREAM_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB Maximum
+DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024     # 5 MB Ideal Default
 
 pyro_client = None
 anime_database = {}
@@ -52,11 +51,9 @@ def parse_anime_info(caption: str, forward_title: str = ""):
     elif "#official" in text.lower():
         dub_type = "official"
 
-    # Extract Season
     season_match = re.search(r"(?:Season|S)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     season = season_match.group(1) if season_match else "1"
 
-    # Extract Episode
     ep_match = re.search(r"(?:Episode|Ep|E)[\s\-\_]*0*(\d+)", text, re.IGNORECASE)
     if not ep_match:
         clean_text = re.sub(r"\b(1080p|720p|480p|360p|2160p|x264|x265|hevc|2023|2024|2025|2026)\b", "", text, flags=re.IGNORECASE)
@@ -64,7 +61,6 @@ def parse_anime_info(caption: str, forward_title: str = ""):
 
     episode = int(ep_match.group(1)) if ep_match else 1
 
-    # Extract Anime Title
     explicit_name = re.search(r"(?:Anime|Title|Name)\s*:\s*([^\n\r\t|]+)", text, re.IGNORECASE)
 
     if explicit_name:
@@ -119,7 +115,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
         })
         ep_list.sort(key=lambda x: x["ep"])
 
-# ==================== WORKING BATCH ID SCANNER ====================
+# ==================== BATCH ID SCANNER ====================
 async def auto_scan_channels():
     if not CHANNEL_IDS:
         print("ℹ️ No CHANNEL_ID set. Skipping channel scan.")
@@ -360,15 +356,32 @@ async def get_media_response(
     from_bytes = 0
     until_bytes = file_size - 1
 
-    if range_header:
-        range_match = re.search(r"bytes=(\d+)-(\d*)", range_header)
-        if range_match:
-            start = range_match.group(1)
-            end = range_match.group(2)
-            from_bytes = int(start) if start else 0
-            until_bytes = int(end) if end else file_size - 1
+    # ==================== STRICT 1MB - 10MB CHUNK BOUNDARY ====================
+    if not is_download:
+        if range_header:
+            range_match = re.search(r"bytes=(\d+)-(\d*)", range_header)
+            if range_match:
+                start = range_match.group(1)
+                end = range_match.group(2)
+                from_bytes = int(start) if start else 0
+                if end:
+                    until_bytes = int(end)
+                else:
+                    # Unbounded request (e.g. bytes=0-), set to 5MB default
+                    until_bytes = from_bytes + DEFAULT_CHUNK_SIZE - 1
+        else:
+            until_bytes = from_bytes + DEFAULT_CHUNK_SIZE - 1
 
-    chunk_length = until_bytes - from_bytes + 1
+        # Enforce Minimum 1 MB and Maximum 10 MB limits per response chunk
+        requested_length = until_bytes - from_bytes + 1
+        
+        if requested_length > MAX_STREAM_CHUNK_SIZE:
+            until_bytes = from_bytes + MAX_STREAM_CHUNK_SIZE - 1
+        elif requested_length < MIN_STREAM_CHUNK_SIZE and (file_size - from_bytes) >= MIN_STREAM_CHUNK_SIZE:
+            until_bytes = from_bytes + MIN_STREAM_CHUNK_SIZE - 1
+
+    until_bytes = min(until_bytes, file_size - 1)
+    chunk_length = (until_bytes - from_bytes) + 1
 
     if is_download:
         mime_type = "application/octet-stream"
@@ -392,21 +405,22 @@ async def get_media_response(
     if request.method == "HEAD":
         return Response(status_code=206 if range_header else 200, headers=headers)
 
-    # ==================== FIXED FAST RANGE STREAMING ====================
-    chunk_size = 1024 * 1024  # 1MB chunk size
-    start_chunk = from_bytes // chunk_size
-    end_chunk = until_bytes // chunk_size
-    skip_bytes = from_bytes % chunk_size
-
-    # Limit parameter calculated so Pyrogram does not download full 300MB
+    # Pyrogram 1MB Block Engine
+    PYRO_BLOCK_SIZE = 1024 * 1024
+    start_chunk = from_bytes // PYRO_BLOCK_SIZE
+    end_chunk = until_bytes // PYRO_BLOCK_SIZE
     chunks_to_fetch = (end_chunk - start_chunk) + 1
+    skip_bytes = from_bytes % PYRO_BLOCK_SIZE
 
     async def media_streamer():
         bytes_sent = 0
         current_skipped = 0
         try:
-            # FIXED: Added limit=chunks_to_fetch
-            async for chunk in pyro_client.stream_media(msg, offset=start_chunk, limit=chunks_to_fetch):
+            async for chunk in pyro_client.stream_media(
+                msg, 
+                offset=start_chunk, 
+                limit=chunks_to_fetch if not is_download else None
+            ):
                 if current_skipped < skip_bytes:
                     if current_skipped + len(chunk) <= skip_bytes:
                         current_skipped += len(chunk)
@@ -417,8 +431,12 @@ async def get_media_response(
                         current_skipped = skip_bytes
 
                 remaining = chunk_length - bytes_sent
+                if remaining <= 0:
+                    break
+
                 if len(chunk) >= remaining:
                     yield chunk[:remaining]
+                    bytes_sent += remaining
                     break
 
                 yield chunk
@@ -426,7 +444,7 @@ async def get_media_response(
         except (asyncio.CancelledError, Exception):
             pass
 
-    status_code = 206 if range_header else 200
+    status_code = 206 if (range_header or not is_download) else 200
     return StreamingResponse(media_streamer(), status_code=status_code, headers=headers)
 
 
@@ -439,3 +457,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
+    
