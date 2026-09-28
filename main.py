@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 
-# 🚨 FIX FOR RUNTIME ERROR: SET EVENT LOOP BEFORE PYROGRAM IMPORT
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -92,7 +91,7 @@ def parse_anime_info(caption: str, forward_title: str = ""):
 
 def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str):
     anime_name, season_num, ep_num, dub_type = parse_anime_info(caption, forward_title)
-    slug_key = anime_name.lower().replace(" ", "_")
+    slug_key = re.sub(r'[^a-zA-Z0-9]', '_', anime_name.lower()).strip('_')
 
     if slug_key not in anime_database:
         anime_database[slug_key] = {"title": anime_name, "seasons": {}}
@@ -120,7 +119,7 @@ def add_to_database(chat_id: str, msg_id: int, caption: str, forward_title: str)
         })
         ep_list.sort(key=lambda x: x["ep"])
 
-# ==================== WORKING BATCH ID SCANNER (FROM OLD CODE) ====================
+# ==================== WORKING BATCH ID SCANNER ====================
 async def auto_scan_channels():
     if not CHANNEL_IDS:
         print("ℹ️ No CHANNEL_ID set. Skipping channel scan.")
@@ -139,7 +138,6 @@ async def auto_scan_channels():
             empty_count = 0
             scanned_count = 0
 
-            # Checks up to 10 empty chunks (1000 IDs gap) before moving to next channel
             while empty_count < 10:
                 msg_ids = list(range(current_id, current_id + chunk_size))
                 try:
@@ -308,15 +306,24 @@ def reset_db_api():
 
 @app.get("/api/episodes/{anime_slug}")
 def get_anime_episodes(anime_slug: str):
-    slug = anime_slug.lower().replace("-", "_")
-    if slug in anime_database:
-        return anime_database[slug]
+    clean_query = re.sub(r'[^a-zA-Z0-9]', '', anime_slug.lower())
 
+    if not anime_database:
+        return {"title": anime_slug.replace("_", " ").title(), "seasons": {"1": []}}
+
+    # 1. Exact Key Match
+    if anime_slug.lower() in anime_database:
+        return anime_database[anime_slug.lower()]
+
+    # 2. Flexible Fuzzy Match
     for key in anime_database:
-        if slug in key or key in slug:
+        clean_key = re.sub(r'[^a-zA-Z0-9]', '', key.lower())
+        if clean_query in clean_key or clean_key in clean_query:
             return anime_database[key]
 
-    return {"title": slug.replace("_", " ").title(), "seasons": {"1": []}}
+    # Return first anime as fallback if database has entries
+    first_anime = list(anime_database.values())[0]
+    return first_anime
 
 
 async def get_media_response(
@@ -429,3 +436,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
+    
