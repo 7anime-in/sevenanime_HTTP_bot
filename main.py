@@ -20,10 +20,11 @@ from pyrogram import Client, filters
 from pyrogram.errors import PeerIdInvalid, ChannelInvalid, RPCError, FloodWait
 
 # ==================== ENVIRONMENT VARIABLES ====================
-API_ID = int(os.getenv("API_ID", "31169133"))
-API_HASH = os.getenv("API_HASH", "b836f4b836df4cf83c2d475a5ad3b285")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8895047045:AAE6uBXrMfsHy_OwW_Jx-3OegdzOpndzSWA")
-APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
+# Environment variables will be fetched directly from Render configuration
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+APP_URL = os.getenv("APP_URL", "")
 
 CHANNEL_INPUT = os.getenv("CHANNEL_ID", "")
 CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
@@ -127,7 +128,7 @@ async def auto_scan_channels():
         print("ℹ️ No CHANNEL_ID set. Skipping channel scan.")
         return
 
-    print("🔍 Scanning Telegram Channels...")
+    print("🔍 Auto-scanning Telegram Channels safely...")
 
     for ch_id in CHANNEL_IDS:
         if not ch_id:
@@ -135,43 +136,25 @@ async def auto_scan_channels():
         try:
             target_chat = int(ch_id) if (ch_id.startswith("-") or ch_id.isdigit()) else (ch_id if ch_id.startswith("@") else f"@{ch_id}")
             
-            chunk_size = 100
-            current_id = 1
-            empty_count = 0
+            scanned_count = 0
+            async for message in pyro_client.get_chat_history(target_chat):
+                if is_video_message(message):
+                    caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
+                    forward_title = (
+                        message.forward_from_chat.title
+                        if message.forward_from_chat
+                        else (message.forward_sender_name or "")
+                    )
+                    add_to_database(str(target_chat), message.id, caption, forward_title)
+                    scanned_count += 1
+                
+                # Small pause to prevent hitting Telegram API Rate Limits
+                await asyncio.sleep(0.02)
 
-            while empty_count < 5:
-                msg_ids = list(range(current_id, current_id + chunk_size))
-                try:
-                    messages = await pyro_client.get_messages(target_chat, msg_ids)
-                    has_media_in_chunk = False
-
-                    if messages:
-                        for message in messages:
-                            if is_video_message(message):
-                                has_media_in_chunk = True
-                                caption = message.caption or getattr(message.video or message.document, "file_name", "") or ""
-                                forward_title = (
-                                    message.forward_from_chat.title
-                                    if message.forward_from_chat
-                                    else (message.forward_sender_name or "")
-                                )
-                                add_to_database(str(target_chat), message.id, caption, forward_title)
-
-                    if not has_media_in_chunk:
-                        empty_count += 1
-                    else:
-                        empty_count = 0
-
-                    current_id += chunk_size
-                    await asyncio.sleep(0.1)
-
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 1)
-                except Exception as e:
-                    print(f"Batch fetch info at ID {current_id}: {e}")
-                    current_id += chunk_size
-
-            print(f"✅ Channel '{target_chat}' scanned completely!")
+            print(f"✅ Channel '{target_chat}' scan complete! Total videos indexed: {scanned_count}")
+        except FloodWait as e:
+            print(f"⚠️ Telegram Rate Limit hit! Waiting for {e.value} seconds...")
+            await asyncio.sleep(e.value)
         except Exception as e:
             print(f"⚠️ Error scanning channel {ch_id}: {e}")
 
@@ -195,7 +178,9 @@ async def lifespan(app: FastAPI):
             "Mai aapki Telegram channel ki anime videos ko Web Player aur Website se connect karta hu.\n\n"
             "🛠 **Commands:**\n"
             "• `/start` - Check bot status\n"
-            "• `/stats` - Total indexed anime and episode count",
+            "• `/stats` - Total indexed anime and episode count\n"
+            "• `/cleardb` - Clear in-memory database\n"
+            "• `/rescan` - Re-scan channel history completely",
             quote=True,
         )
 
@@ -214,7 +199,18 @@ async def lifespan(app: FastAPI):
             quote=True,
         )
 
-    @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats"]))
+    @pyro_client.on_message(filters.command("cleardb"))
+    async def clear_db_cmd(client, message):
+        anime_database.clear()
+        await message.reply_text("🧹 **Database Memory Successfully Cleared!**", quote=True)
+
+    @pyro_client.on_message(filters.command("rescan"))
+    async def rescan_cmd(client, message):
+        anime_database.clear()
+        await message.reply_text("🔄 **Database Reset! Rescanning channel history...**", quote=True)
+        asyncio.create_task(auto_scan_channels())
+
+    @pyro_client.on_message((filters.video | filters.document) & ~filters.command(["start", "stats", "cleardb", "rescan"]))
     async def auto_link_gen(client, message):
         if not is_video_message(message):
             return
@@ -272,7 +268,6 @@ app.add_middleware(
 def home():
     return {"status": "SevenAnime Engine Active 🚀"}
 
-# 🎬 WEB PLAYER ENDPOINT
 @app.get("/player", response_class=HTMLResponse)
 def get_web_player():
     for file_name in ["7anime_videoplayer.html", "videoplayer.html", "7anime_videoplayer_2.html"]:
@@ -284,6 +279,12 @@ def get_web_player():
 @app.get("/api/all-anime")
 def get_all_anime():
     return anime_database
+
+@app.get("/api/reset-db")
+def reset_db_api():
+    anime_database.clear()
+    asyncio.create_task(auto_scan_channels())
+    return {"status": "Database reset & scan initiated"}
 
 @app.get("/api/episodes/{anime_slug}")
 def get_anime_episodes(anime_slug: str):
@@ -306,7 +307,7 @@ async def get_media_response(
     is_download: bool = False,
 ):
     if request.method == "OPTIONS":
-        return Response(status_code=200, headers={"Access-Control-Allow-Origin": "*"})
+        return Response(status_code=200)
 
     msg_id_clean = int(str(message_id).replace(".mp4", "").replace(".mkv", ""))
 
@@ -361,9 +362,6 @@ async def get_media_response(
         "Accept-Ranges": "bytes",
         "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
         "Content-Length": str(chunk_length),
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition",
         "Cache-Control": "no-cache",
     }
 
@@ -411,4 +409,4 @@ async def stream_video(chat_id: str, message_id: str, request: Request, range: s
 @app.api_route("/download/{chat_id}/{message_id}.mp4", methods=["GET", "HEAD", "OPTIONS"])
 async def download_video(chat_id: str, message_id: str, request: Request, range: str = Header(None)):
     return await get_media_response(chat_id, message_id, request, range, is_download=True)
-    
+               
