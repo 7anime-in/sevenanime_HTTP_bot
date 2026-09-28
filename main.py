@@ -21,13 +21,13 @@ APP_URL = os.getenv("APP_URL", "https://sevenanime-http-bot.onrender.com")
 CHANNEL_INPUT = os.getenv("CHANNEL_ID", "-1004315586873,-1004409520918,sevenanime_ch1")
 CHANNEL_IDS = [ch.strip() for ch in CHANNEL_INPUT.split(",") if ch.strip()]
 
-# ==================== CHUNK LIMIT CONFIGURATION (1MB to 10MB) ====================
-MIN_STREAM_CHUNK_SIZE = 1 * 1024 * 1024   # 1 MB Minimum
-MAX_STREAM_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB Maximum
-DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024     # 5 MB Ideal Default
+# ==================== CHUNK LIMIT CONFIGURATION ====================
+MAX_STREAM_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB Max Cap
+DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024     # 5 MB Ideal Default Chunk
 
 pyro_client = None
 anime_database = {}
+MESSAGE_CACHE: Dict[str, Any] = {}  # Rate Limit Bypass Cache
 
 def is_video_message(message) -> bool:
     if not message or message.empty:
@@ -216,11 +216,13 @@ async def lifespan(app: FastAPI):
     @pyro_client.on_message(filters.command("cleardb"))
     async def clear_db_cmd(client, message):
         anime_database.clear()
-        await message.reply_text("🧹 **Database Memory Successfully Cleared!**", quote=True)
+        MESSAGE_CACHE.clear()
+        await message.reply_text("🧹 **Database & Cache Memory Successfully Cleared!**", quote=True)
 
     @pyro_client.on_message(filters.command("rescan"))
     async def rescan_cmd(client, message):
         anime_database.clear()
+        MESSAGE_CACHE.clear()
         await message.reply_text("🔄 **Database Reset! Rescanning channel history...**", quote=True)
         asyncio.create_task(auto_scan_channels())
 
@@ -297,6 +299,7 @@ def get_all_anime():
 @app.get("/api/reset-db")
 def reset_db_api():
     anime_database.clear()
+    MESSAGE_CACHE.clear()
     asyncio.create_task(auto_scan_channels())
     return {"status": "Database reset & scan initiated"}
 
@@ -336,13 +339,20 @@ async def get_media_response(
             raise HTTPException(status_code=503, detail="Telegram engine offline hai.")
         return Response(content=b"", media_type="video/mp4", status_code=503)
 
-    try:
-        target_id = int(chat_id) if (chat_id.startswith("-") or chat_id.isdigit()) else (chat_id if chat_id.startswith("@") else f"@{chat_id}")
-        msg = await pyro_client.get_messages(target_id, msg_id_clean)
-    except Exception as e:
-        if is_download:
-            raise HTTPException(status_code=404, detail=f"Video message nahi mila: {str(e)}")
-        return Response(content=b"", media_type="video/mp4", status_code=404)
+    # 1. Cache Check (Telegram Rate Limit & Speed Protection)
+    cache_key = f"{chat_id}_{msg_id_clean}"
+    msg = MESSAGE_CACHE.get(cache_key)
+
+    if not msg:
+        try:
+            target_id = int(chat_id) if (chat_id.startswith("-") or chat_id.isdigit()) else (chat_id if chat_id.startswith("@") else f"@{chat_id}")
+            msg = await pyro_client.get_messages(target_id, msg_id_clean)
+            if msg and is_video_message(msg):
+                MESSAGE_CACHE[cache_key] = msg
+        except Exception as e:
+            if is_download:
+                raise HTTPException(status_code=404, detail=f"Video message nahi mila: {str(e)}")
+            return Response(content=b"", media_type="video/mp4", status_code=404)
 
     if not is_video_message(msg):
         if is_download:
@@ -356,30 +366,28 @@ async def get_media_response(
     from_bytes = 0
     until_bytes = file_size - 1
 
-    # ==================== STRICT 1MB - 10MB CHUNK BOUNDARY ====================
-    if not is_download:
-        if range_header:
-            range_match = re.search(r"bytes=(\d+)-(\d*)", range_header)
-            if range_match:
-                start = range_match.group(1)
-                end = range_match.group(2)
-                from_bytes = int(start) if start else 0
-                if end:
-                    until_bytes = int(end)
-                else:
-                    # Unbounded request (e.g. bytes=0-), set to 5MB default
-                    until_bytes = from_bytes + DEFAULT_CHUNK_SIZE - 1
-        else:
-            until_bytes = from_bytes + DEFAULT_CHUNK_SIZE - 1
+    # 2. Dynamic Browser Range Parsing (Fixed Stream Logic)
+    if not is_download and range_header:
+        range_match = re.search(r"bytes=(\d+)-(\d*)", range_header)
+        if range_match:
+            start = range_match.group(1)
+            end = range_match.group(2)
+            from_bytes = int(start) if start else 0
+            if end:
+                # Browser specified exact end boundary (e.g. bytes=0-1023)
+                until_bytes = int(end)
+            else:
+                # Unbounded request (e.g. bytes=0-), set to 5MB default chunk
+                until_bytes = from_bytes + DEFAULT_CHUNK_SIZE - 1
+    elif not is_download:
+        until_bytes = from_bytes + DEFAULT_CHUNK_SIZE - 1
 
-        # Enforce Minimum 1 MB and Maximum 10 MB limits per response chunk
-        requested_length = until_bytes - from_bytes + 1
-        
-        if requested_length > MAX_STREAM_CHUNK_SIZE:
-            until_bytes = from_bytes + MAX_STREAM_CHUNK_SIZE - 1
-        elif requested_length < MIN_STREAM_CHUNK_SIZE and (file_size - from_bytes) >= MIN_STREAM_CHUNK_SIZE:
-            until_bytes = from_bytes + MIN_STREAM_CHUNK_SIZE - 1
+    # 3. Cap Max Chunk Size ONLY if requested chunk is larger than 10MB
+    requested_length = until_bytes - from_bytes + 1
+    if requested_length > MAX_STREAM_CHUNK_SIZE:
+        until_bytes = from_bytes + MAX_STREAM_CHUNK_SIZE - 1
 
+    # Bound check against total file size
     until_bytes = min(until_bytes, file_size - 1)
     chunk_length = (until_bytes - from_bytes) + 1
 
@@ -405,7 +413,7 @@ async def get_media_response(
     if request.method == "HEAD":
         return Response(status_code=206 if range_header else 200, headers=headers)
 
-    # Pyrogram 1MB Block Engine
+    # 4. Pyrogram Streaming Engine
     PYRO_BLOCK_SIZE = 1024 * 1024
     start_chunk = from_bytes // PYRO_BLOCK_SIZE
     end_chunk = until_bytes // PYRO_BLOCK_SIZE
